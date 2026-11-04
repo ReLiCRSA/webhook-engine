@@ -1,0 +1,6 @@
+{
+  "name": "@webhooks/open",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Open webhook (no auth) — demonstrates the open-endpoint startup warning."
+}

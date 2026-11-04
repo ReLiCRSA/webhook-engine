@@ -1,0 +1,6 @@
+{
+  "name": "@webhooks/gated",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Gated webhook demo: no own auth; config.json opts into the engine's generic auth (useGlobalAuth)."
+}

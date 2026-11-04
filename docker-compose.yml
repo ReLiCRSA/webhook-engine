@@ -1,0 +1,37 @@
+# Docker Compose: centrally hosted Postgres for webhook-engine.
+#
+# Environment variables come from the host/`.env`: DB_HOST, DB_PORT,
+# DB_USER, DB_PASSWORD, DB_NAME — the same variables the engine assembles
+# its connection URL from (src/db.js). An explicit DATABASE_URL in the
+# engine's .env still takes precedence over the split vars.
+#
+# Usage:
+#   npm run db:up           # = docker compose up -d
+#   npm run db:down         # = docker compose down  (keeps data volume)
+#   npm run db:down -- -v   # also remove stored data
+#
+# Data persists in the named volume `pgdata` and survives `compose up`/`down`.
+
+services:
+  db:
+    image: postgres:16
+    container_name: webhook-engine-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-password}
+      POSTGRES_DB: ${DB_NAME:-webhook}
+    ports:
+      # Loopback only — change the left-hand side if the engine must reach
+      # Postgres from another host.
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:

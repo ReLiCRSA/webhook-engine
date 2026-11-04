@@ -1,0 +1,38 @@
+// Prisma schema for the webhook engine.
+// All database access goes through Prisma — never hand-written SQL.
+// See README.md for field meaning and how modules can use the shared client.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// One row per webhook invocation (including auth failures and unknown webhooks).
+model WebhookCall {
+  id         BigInt   @id @default(autoincrement())
+  /// Webhook name (directory under webhooks/). For unknown routes this is the
+  /// requested name.
+  webhook    String
+  method     String
+  /// Full request URL path, e.g. /webhook/example
+  path       String
+  /// Parsed query parameters, e.g. {"test":"hello"}. Null when no query string.
+  query      Json?
+  /// A snapshot of selected request headers (lower-cased names).
+  headers    Json?
+  /// Parsed body, same shape as the handler receives:
+  /// { url: {...}, post: {...}, json: {...}|null, raw: "string" }
+  body       Json?
+  status     Int
+  /// none | generic | module | denied — how (or whether) the call was authenticated.
+  auth       String   @default("none")
+  durationMs Int?
+  createdAt  DateTime @default(now())
+
+  @@index([webhook, createdAt])
+  @@map("webhook_calls")
+}
