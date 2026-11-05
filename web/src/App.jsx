@@ -37,6 +37,8 @@ export default function App() {
   const [error, setError] = useState(null);
   const [refreshing, setRefreshing] = useState(true);
   const [auto, setAuto] = useState(true);
+  const [replaying, setReplaying] = useState({}); // callId -> true while in flight
+  const [replayResults, setReplayResults] = useState({}); // callId -> { ok, status, newId, error }
 
   const askForToken = useCallback(() => {
     setPrompting(true);
@@ -72,6 +74,40 @@ export default function App() {
       }
     }
   }, [token, filterWebhook, filterMethod, filterStatus, since, offset, askForToken]);
+
+  // Replay one recorded call (POST /api/calls/:id/replay); the engine
+  // re-dispatches it to itself and records a NEW row tagged replayedFromId.
+  const doReplay = useCallback(
+    async (id) => {
+      setReplaying((m) => ({ ...m, [id]: true }));
+      setReplayResults((m) => {
+        const { [id]: _drop, ...rest } = m;
+        return rest;
+      });
+      try {
+        const data = await api(`/api/calls/${id}/replay`, { token, method: 'POST' });
+        setReplayResults((m) => ({
+          ...m,
+          [id]: {
+            ok: true,
+            status: data.call ? data.call.status : data.status,
+            newId: data.call ? data.call.id : null,
+            auth: data.call ? data.call.auth : null,
+          },
+        }));
+        load(); // surface the new row immediately, even with auto-refresh off
+      } catch (e) {
+        if (e.status === 401) askForToken();
+        else setReplayResults((m) => ({ ...m, [id]: { ok: false, error: e.message } }));
+      } finally {
+        setReplaying((m) => {
+          const { [id]: _drop, ...rest } = m;
+          return rest;
+        });
+      }
+    },
+    [token, askForToken, load]
+  );
 
   // Load the webhook list once.
   useEffect(() => {
@@ -175,12 +211,13 @@ export default function App() {
             <th>auth</th>
             <th>ms</th>
             <th>in</th>
+            <th>actions</th>
           </tr>
         </thead>
         <tbody>
           {rows.length === 0 && !refreshing && (
             <tr>
-              <td colSpan={8} className="empty">
+              <td colSpan={9} className="empty">
                 {total === 0 ? (
                   <>
                     No calls recorded yet — send a request to a webhook, e.g.{' '}
@@ -195,7 +232,12 @@ export default function App() {
           {rows.map((r) => (
             <tr key={r.id}>
               <td className="time" title={r.createdAt}>{timeAgo(r.createdAt)}</td>
-              <td>{r.webhook}</td>
+              <td>
+                {r.webhook}
+                {r.replayedFromId != null && (
+                  <code className="replay-badge" title={`replay of call #${r.replayedFromId}`}>↻#{r.replayedFromId}</code>
+                )}
+              </td>
               <td>{r.method}</td>
               <td className="path" title={r.path}>{r.path}</td>
               <td className={STATUS_COLORS[r.status] ? '' : 'other'}>
@@ -204,6 +246,26 @@ export default function App() {
               <td>{r.auth}</td>
               <td>{r.durationMs ?? '—'}</td>
               <td>{r.body ? String(r.body.raw || '').length : 0}</td>
+              <td className="actions">
+                <button
+                  className="replay-btn"
+                  onClick={() => doReplay(r.id)}
+                  disabled={!!replaying[r.id]}
+                  title={`replay this call against /${r.webhook}`}
+                >
+                  {replaying[r.id] ? '↻ …' : '↻ replay'}
+                </button>
+                {replayResults[r.id] && (
+                  replayResults[r.id].ok ? (
+                    <span className="replay-result" title={replayResults[r.id].newId ? `new call #${replayResults[r.id].newId} (${replayResults[r.id].auth})` : 'replayed'}>
+                      → <span className={`status s${String(replayResults[r.id].status).startsWith('2') ? '2' : String(replayResults[r.id].status).startsWith('4') ? '4' : '5'}`}>{replayResults[r.id].status}</span>
+                      {replayResults[r.id].newId != null && <code>#{replayResults[r.id].newId}</code>}
+                    </span>
+                  ) : (
+                    <span className="replay-result failed" title={replayResults[r.id].error}>replay failed</span>
+                  )
+                )}
+              </td>
             </tr>
           ))}
         </tbody>

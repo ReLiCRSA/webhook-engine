@@ -70,8 +70,8 @@ async function main() {
     startup.info(`webhook ${w.name} → ${note}`);
   }
 
-  const { app } = createApp({ logger: log, genericAuth });
   const port = Number(process.env.PORT || 3000);
+  const { app } = createApp({ logger: log, genericAuth, port });
 
   const server = app.listen(port, () => {
     startup.info(`listening on http://127.0.0.1:${port} (db=${dbUp ? 'up' : 'down'})`);

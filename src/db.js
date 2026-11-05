@@ -67,12 +67,27 @@ async function recordWebhookCall(ctx, status, auth, durationMs) {
         status,
         auth,
         durationMs,
+        replayedFromId: extractReplayedFromId(ctx),
       },
     });
   } catch (e) {
     // DB problems must never break the request path.
     console.error(`[db] failed to record webhook call for ${ctx.webhook}: ${e.message}`);
   }
+}
+
+/**
+ * Provenance for replayed calls: the engine's replay feature (src/replay.js)
+ * tags its loopback request with "X-Replay: <originalCallId>" and
+ * recordWebhookCall persists it as replayedFromId. A live client can send the
+ * header itself and self-tag its row — cosmetic metadata only.
+ */
+function extractReplayedFromId(ctx) {
+  const v = ctx && ctx.headers ? ctx.headers['x-replay'] : undefined;
+  const s = Array.isArray(v) ? v[0] : v;
+  if (s === undefined || s === null || s === '') return null;
+  const n = Number(s);
+  return Number.isInteger(n) && n > 0 ? BigInt(n) : null;
 }
 
 function sanitizeHeaders(headers = {}) {
@@ -131,8 +146,54 @@ function mapRow(r) {
     status: r.status,
     auth: r.auth,
     durationMs: r.durationMs,
+    replayedFromId: r.replayedFromId ? Number(r.replayedFromId) : null,
     createdAt: r.createdAt,
   };
 }
 
-module.exports = { getPrisma, ping, recordWebhookCall, listCalls, resolveDatabaseUrl };
+/**
+ * Look up one recorded call by numeric id. Throws with `code='P1001'` when the
+ * database is unreachable; callers map that to 503.
+ */
+async function getCallById(id) {
+  const n = Number(id);
+  if (!Number.isInteger(n) || n <= 0) return null;
+  const db = getPrisma();
+  const row = await db.webhookCall.findUnique({ where: { id: BigInt(n) } });
+  return row ? mapRow(row) : null;
+}
+
+/** Newest recorded call with replayedFromId = callId and id > afterId, or null. */
+async function findLatestReplayOf(callId, afterId) {
+  const db = getPrisma();
+  const row = await db.webhookCall.findFirst({
+    where: { replayedFromId: BigInt(callId), id: { gt: BigInt(afterId) } },
+    orderBy: { id: 'desc' },
+  });
+  return row ? mapRow(row) : null;
+}
+
+/** Highest recorded call id (0 when the table is empty). */
+async function maxCallId() {
+  const db = getPrisma();
+  const row = await db.webhookCall.findFirst({ orderBy: { id: 'desc' }, select: { id: true } });
+  return row && row.id ? Number(row.id) : 0;
+}
+
+/** True when a Prisma error means "database unreachable" (map to HTTP 503). */
+function isDbUnreachable(e) {
+  if (!e) return false;
+  return e.code === 'P1001' || e.code === 'P1017' || e.name === 'PrismaClientInitializationError';
+}
+
+module.exports = {
+  getPrisma,
+  ping,
+  recordWebhookCall,
+  listCalls,
+  resolveDatabaseUrl,
+  getCallById,
+  findLatestReplayOf,
+  maxCallId,
+  isDbUnreachable,
+};

@@ -31,8 +31,12 @@ model WebhookCall {
   /// none | generic | module | denied — how (or whether) the call was authenticated.
   auth       String   @default("none")
   durationMs Int?
+  /// Set when this call was created by replaying another call (id of the
+  /// parent row; chains of replay-of-replay point at their immediate parent).
+  replayedFromId BigInt?
   createdAt  DateTime @default(now())
 
   @@index([webhook, createdAt])
+  @@index([replayedFromId])
   @@map("webhook_calls")
 }

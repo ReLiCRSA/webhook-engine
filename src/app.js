@@ -7,6 +7,7 @@
  *   /webhook/:name(/...)   dispatch to webhooks/<name> via the invoke pipeline
  *   /api/webhooks          list discovered webhooks + their auth mode
  *   /api/calls?webhook=&method=&status=&since=&limit=&offset=
+ *   /api/calls/:id/replay  replay one recorded call (loopback re-dispatch)
  *   /                       static web/dist (dashboard)
  *
  * The raw request body is always captured first (as a string) so the invoke
@@ -24,6 +25,7 @@ const { buildContext } = require('./normalize');
 const db = require('./db');
 const { listCalls } = db;
 const { invoke } = require('./invoke');
+const { replayCall } = require('./replay');
 
 const WEB_DIST = path.join(__dirname, '..', 'web', 'dist');
 
@@ -52,7 +54,7 @@ function makeAuthGuard(genericAuth, logger) {
   };
 }
 
-function createApp({ logger, genericAuth }) {
+function createApp({ logger, genericAuth, port }) {
   const app = express();
   const apiRouter = express.Router();
 
@@ -108,6 +110,47 @@ function createApp({ logger, genericAuth }) {
       res.json({ total: result.total, limit: Number(limit) || 100, offset: Number(offset) || 0, rows: result.rows });
     } catch (e) {
       logger.error(`api /calls failed: ${e.message}`);
+      res.status(500).json({ error: 'internal error' });
+    }
+  });
+
+  // Replay one recorded call: re-dispatches it to this engine over loopback
+  // (see src/replay.js). The replay authenticates with the CALLER's
+  // credentials — the original ones were redacted at rest and are gone.
+  apiRouter.post('/calls/:id/replay', async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      res.status(400).json({ error: 'expected numeric call id' });
+      return;
+    }
+    if (!port) {
+      logger.error('api /calls/:id/replay: engine port not configured (createApp port option)');
+      res.status(500).json({ error: 'internal error' });
+      return;
+    }
+    try {
+      const result = await replayCall({
+        callId: id,
+        port,
+        callerAuthorization: req.headers['authorization'] || null,
+        genericAuth,
+        db,
+        logger,
+      });
+      if (result.notFound) {
+        res.status(404).json({ error: `call not found: ${id}` });
+        return;
+      }
+      // The replay RAN even if the webhook answered 401/500 — that outcome is
+      // recorded as data (call row), not as an API error.
+      res.json(result);
+    } catch (e) {
+      if (db.isDbUnreachable(e)) {
+        logger.warn(`api /calls/${id}/replay: database unavailable (${e.message})`);
+        res.status(503).json({ error: 'database unavailable' });
+        return;
+      }
+      logger.error(`api /calls/${id}/replay failed: ${e.stack || e.message}`);
       res.status(500).json({ error: 'internal error' });
     }
   });

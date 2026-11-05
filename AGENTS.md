@@ -89,8 +89,12 @@ All rows must hold:
 | 12 | (hmac mode) `POST /webhook/gated` with `X-Signature` from secret A or from rotated secret B | 201 | `generic` |
 | 13 | (hmac mode) `POST /webhook/gated` with wrong `X-Signature` | 401 | `denied` |
 | 14 | (hmac mode) `GET /webhook/open` | 200 | `none` (open webhooks ignore AUTH_MODE) |
-| 15 | `_prisma_migrations` after the demo webhook migration is applied | 2 rows: `20261102224736_init`, `20261103095217_example_events` (chronological) | — |
+| 15 | `_prisma_migrations` after the demo webhook migration is applied | 3 rows: `20261102224736_init`, `20261103095217_example_events`, `20261105124922_add_replay_column` (chronological) | — |
 | 16 | `npx prisma migrate deploy` after step 15 (with assembled `DATABASE_URL`) | 200 / "No pending migrations to apply", exit 0; `example_events` exists | — |
+| 17 | `POST /api/calls/<row-4-id>/replay` with token | 200 (replay answered 200); new row for `open`, GET, query rebuilt | `none`, `replayedFromId` = id of row 4 |
+| 18 | `POST /api/calls/<row-7-id>/replay` with token | 200 (replay answered 201) | `generic` (replay forwards the **caller's** Authorization; stored originals are redacted), `replayedFromId` set |
+| 19 | `POST /api/calls/999999/replay` with token → 404; without token → 401; `POST /api/calls/abc/replay` with token → 400 | — | (401 stores no row; API is not a webhook) |
+| 20 | (hmac mode) `POST /api/calls/<row-12-id>/replay` with valid API credentials | 200 (replay answered 201) | `generic` (body re-signed with the engine's current secret), `replayedFromId` set |
 
 Invariants to re-check after any change:
 

@@ -9,10 +9,10 @@ export function setToken(t) {
   else localStorage.removeItem(TOKEN_KEY);
 }
 
-export async function api(path, { token } = {}) {
+export async function api(path, { token, method = 'GET' } = {}) {
   const headers = {};
   if (token) headers.Authorization = `Bearer ${token}`;
-  const res = await fetch(path, { headers });
+  const res = await fetch(path, { method, headers });
   if (res.status === 401) {
     const err = new Error('unauthorized');
     err.status = 401;

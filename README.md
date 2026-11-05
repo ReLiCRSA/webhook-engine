@@ -225,7 +225,9 @@ failure **and** unknown-webhook 404s).
 
 Every webhook call is stored in `webhook_calls` (Prisma model `WebhookCall`):
 id, webhook, method, path, query, headers, body (url/post/json/raw), status,
-auth, durationMs, createdAt. Auth failures and unknown webhooks are included.
+auth, durationMs, replayedFromId (set when the call was created by replaying
+another call — see “Replay” below), createdAt. Auth failures and unknown
+webhooks are included.
 
 Header handling: only `authorization`, `x-signature`, `content-type`,
 `user-agent`, `x-forwarded-for` and other `x-*` headers are stored; the
@@ -237,8 +239,9 @@ Header handling: only `authorization`, `x-signature`, `content-type`,
 |---|---|---|
 | `GET /api/webhooks` | — | Discovered webhooks + effective auth mode (`module` / `generic` / `none`). |
 | `GET /api/calls` | `webhook`, `method`, `status`, `since` (ISO date), `limit` (≤500, default 100), `offset` | Newest-first call rows with total count. |
+| `POST /api/calls/:id/replay` | — | Re-execute recorded call `:id`; returns `{ original, status, responseBytes, call }` where `call` is the freshly recorded replay row. 404 unknown id, 400 non-numeric id, 503 database unavailable. |
 
-Both require the generic auth (401 without it).
+All require the generic auth (401 without it).
 
 ```bash
 curl 'http://localhost:3000/api/calls?limit=10' \
@@ -246,7 +249,48 @@ curl 'http://localhost:3000/api/calls?limit=10' \
 
 curl 'http://localhost:3000/api/calls?webhook=example&status=401' \
   -H 'Authorization: Bearer <token>'
+
+curl -X POST 'http://localhost:3000/api/calls/42/replay' \
+  -H 'Authorization: Bearer <token>'
 ```
+
+### Replay
+
+`POST /api/calls/:id/replay` (and the ↻ replay button in the dashboard)
+re-executes a stored call through the **full live dispatch pipeline**: the
+engine rebuilds the request (method, path, query string from the stored
+query JSON, stored allowlisted headers, the exact `body.raw` bytes) and
+re-sends it to **itself** over loopback HTTP (`src/replay.js`). So raw-body
+capture, `buildContext`, the auth chain, the safety timer and the call-log
+insert all behave exactly as for a real client. The replay is recorded as a
+**new row** whose `replayedFromId` points at the row it replayed (the
+loopback request carries an `X-Replay: <id>` header, persisted by
+`recordWebhookCall`). Replaying a replay is allowed — `replayedFromId` then
+points at the immediate parent, so chains stay visible.
+
+Credentials: stored `Authorization` values are redacted at rest, so the
+original ones are unrecoverable. The replay instead forwards the
+**Authorization header of the API caller** who triggered it, and when
+generic HMAC auth is active the body is **re-signed** with the engine's
+current secret (`X-Signature`). The replay therefore authenticates however
+it actually authenticates — an `auth=denied` row can replay successfully
+when the caller supplies valid credentials; the recorded `auth` value is
+never inherited from the original.
+
+Known limitations:
+
+- Headers outside the log allowlist were never stored, so they cannot be
+  replayed (the stored `Authorization` is a redaction placeholder and the
+  stored `X-Signature` is replaced with a fresh one).
+- `body.raw` is stored as a UTF-8 string: text bodies (JSON, forms) replay
+  byte-exact; binary/multipart payloads are not guaranteed byte-identical.
+- Module-level `auth(ctx)` schemes the engine can't reproduce (API-key
+  lookups, IP allowlists, provider signatures) simply see the replay as any
+  other request — typically 401, recorded honestly as `auth=denied`.
+- A live client may send `X-Replay` itself and self-tag its row; the column
+  is cosmetic provenance, not a trust boundary.
+- The replay endpoint always answers 200 when the replay *ran* — a 401/500
+  from the webhook is data in the new row, not an API error.
 
 ## Logging
 
@@ -268,7 +312,8 @@ React + Vite, no router/UI libs. Served by the engine at `/` from `web/dist`
 (the directory must exist **before** the engine starts — rebuild and restart
 after changing the frontend). Features: bearer-token prompt (401 → prompt →
 localStorage), filterable table (webhook / method / status / since), 100-row
-pages with load-more, 5 s auto-refresh (toggleable).
+pages with load-more, 5 s auto-refresh (toggleable), per-row ↻ replay button
+(result + new-row id shown inline) and `↻#<id>` badges on replayed rows.
 
 Development (hot reload; Vite proxies `/api` to `:3000`):
 
@@ -492,6 +537,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST $B/webhook/gated -d '{}'       
 curl -s -o /dev/null -w '%{http_code}\n' -X POST $B/webhook/gated -H "$T" -d '{}'                           # 201, auth=generic
 curl -s -o /dev/null -w '%{http_code}\n' $B/api/calls                                                     # 401
 curl -s -o /dev/null -w '%{http_code}\n' $B/                                                             # 200 (dashboard)
+curl -s -X POST $B/api/calls/1/replay -H "$T" | head -c 400                                             # 200; new row with replayedFromId=1
 ```
 
 HMAC mode, two secrets (rotation in effect):
