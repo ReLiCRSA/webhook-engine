@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { api, getToken, setToken } from './api.js';
+import CallDetail from './CallDetail.jsx';
 
 const PAGE = 100;
 const REFRESH_MS = 5000;
@@ -39,6 +40,7 @@ export default function App() {
   const [auto, setAuto] = useState(true);
   const [replaying, setReplaying] = useState({}); // callId -> true while in flight
   const [replayResults, setReplayResults] = useState({}); // callId -> { ok, status, newId, error }
+  const [detailRow, setDetailRow] = useState(null); // row shown in the data-detail modal
 
   const askForToken = useCallback(() => {
     setPrompting(true);
@@ -248,6 +250,13 @@ export default function App() {
               <td>{r.body ? String(r.body.raw || '').length : 0}</td>
               <td className="actions">
                 <button
+                  className="view-btn"
+                  onClick={() => setDetailRow(r)}
+                  title="show headers, query and body of this call"
+                >
+                  ▤ data
+                </button>
+                <button
                   className="replay-btn"
                   onClick={() => doReplay(r.id)}
                   disabled={!!replaying[r.id]}
@@ -284,6 +293,8 @@ export default function App() {
           <code key={w.name} title={`auth: ${w.auth}`}>{w.name}</code>
         ))}
       </footer>
+
+      {detailRow && <CallDetail row={detailRow} onClose={() => setDetailRow(null)} />}
     </div>
   );
 }
