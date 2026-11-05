@@ -111,3 +111,23 @@ export default function JsonTree({ value, forceOpen }) {
     </div>
   );
 }
+
+/** Detail-view section: titled JsonTree with expand-all / collapse controls.
+ *  forceOpen is applied via re-mount: bumping seq re-creates the tree. */
+export function TreeSection({ title, value, hint }) {
+  const [ctrl, setCtrl] = useState({ open: undefined, seq: 0 });
+  const apply = (open) => setCtrl((c) => ({ open, seq: c.seq + 1 }));
+  return (
+    <div className="detail-section">
+      <div className="section-head">
+        <h3>{title}</h3>
+        <span className="section-tools">
+          {hint && <em className="section-hint">{hint}</em>}
+          <button className="mini-btn" onClick={() => apply(true)} title="expand all nodes">expand all</button>
+          <button className="mini-btn" onClick={() => apply(false)} title="collapse all nodes">collapse</button>
+        </span>
+      </div>
+      <JsonTree key={`${title}:${ctrl.seq}`} value={value} forceOpen={ctrl.open} />
+    </div>
+  );
+}

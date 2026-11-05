@@ -261,7 +261,7 @@ Header handling: only `authorization`, `x-signature`, `content-type`,
 |---|---|---|
 | `GET /api/webhooks` | — | Discovered webhooks + effective auth mode (`module` / `generic` / `none`). |
 | `GET /api/calls` | `webhook`, `method`, `status`, `since` (ISO date), `limit` (≤500, default 100), `offset` | Newest-first call rows with total count. |
-| `POST /api/calls/:id/replay` | — | Re-execute recorded call `:id`; returns `{ original, status, responseBytes, call }` where `call` is the freshly recorded replay row. 404 unknown id, 400 non-numeric id, 503 database unavailable. |
+| `POST /api/calls/:id/replay` | — | Re-execute recorded call `:id`; returns `{ original, status, responseBytes, response, call }` where `response` is the webhook's captured answer (`{ status, headers, body, truncated }`, transient, never persisted; body capped at 64 KiB) and `call` is the freshly recorded replay row. 404 unknown id, 400 non-numeric id, 503 database unavailable. |
 
 All require the generic auth (401 without it).
 
@@ -289,6 +289,12 @@ insert all behave exactly as for a real client. The replay is recorded as a
 loopback request carries an `X-Replay: <id>` header, persisted by
 `recordWebhookCall`). Replaying a replay is allowed — `replayedFromId` then
 points at the immediate parent, so chains stay visible.
+
+The webhook's **answer** is captured (status, headers, body — first 64 KiB,
+flagged `truncated`) and returned as `response` so the dashboard can pop up a
+modal with JSON trees of the reply right after the replay. This is transient
+viewing data: call rows still record only the request side, nothing from the
+response is persisted.
 
 Credentials: stored `Authorization` values are redacted at rest, so the
 original ones are unrecoverable. The replay instead forwards the
@@ -335,7 +341,9 @@ React + Vite, no router/UI libs. Served by the engine at `/` from `web/dist`
 after changing the frontend). Features: bearer-token prompt (401 → prompt →
 localStorage), filterable table (webhook / method / status / since), 100-row
 pages with load-more, 5 s auto-refresh (toggleable), per-row ↻ replay button
-(result + new-row id shown inline) and `↻#<id>` badges on replayed rows.
+(result + new-row id shown inline, clickable to (re-)open a modal with trees
+of the replay's response and recorded request) and `↻#<id>` badges on
+replayed rows.
 
 Development (hot reload; Vite proxies `/api` to `:3000`):
 

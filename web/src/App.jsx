@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { api, getToken, setToken } from './api.js';
 import CallDetail from './CallDetail.jsx';
+import ReplayModal from './ReplayModal.jsx';
 
 const PAGE = 100;
 const REFRESH_MS = 5000;
@@ -39,7 +40,8 @@ export default function App() {
   const [refreshing, setRefreshing] = useState(true);
   const [auto, setAuto] = useState(true);
   const [replaying, setReplaying] = useState({}); // callId -> true while in flight
-  const [replayResults, setReplayResults] = useState({}); // callId -> { ok, status, newId, error }
+  const [replayResults, setReplayResults] = useState({}); // callId -> { ok, status, newId, error, result }
+  const [replayModalId, setReplayModalId] = useState(null); // callId whose replay-result modal is open
   const [detailRow, setDetailRow] = useState(null); // row shown in the data-detail modal
 
   const askForToken = useCallback(() => {
@@ -95,8 +97,10 @@ export default function App() {
             status: data.call ? data.call.status : data.status,
             newId: data.call ? data.call.id : null,
             auth: data.call ? data.call.auth : null,
+            result: data, // full replay payload — powers the response modal
           },
         }));
+        setReplayModalId(id); // pop up the response viewer with the returned data
         load(); // surface the new row immediately, even with auto-refresh off
       } catch (e) {
         if (e.status === 401) askForToken();
@@ -266,10 +270,15 @@ export default function App() {
                 </button>
                 {replayResults[r.id] && (
                   replayResults[r.id].ok ? (
-                    <span className="replay-result" title={replayResults[r.id].newId ? `new call #${replayResults[r.id].newId} (${replayResults[r.id].auth})` : 'replayed'}>
+                    <button
+                      type="button"
+                      className="replay-result"
+                      onClick={() => replayResults[r.id].result && setReplayModalId(r.id)}
+                      title={(replayResults[r.id].newId ? `new call #${replayResults[r.id].newId} (${replayResults[r.id].auth})` : 'replayed') + ' — click to view the response'}
+                    >
                       → <span className={`status s${String(replayResults[r.id].status).startsWith('2') ? '2' : String(replayResults[r.id].status).startsWith('4') ? '4' : '5'}`}>{replayResults[r.id].status}</span>
                       {replayResults[r.id].newId != null && <code>#{replayResults[r.id].newId}</code>}
-                    </span>
+                    </button>
                   ) : (
                     <span className="replay-result failed" title={replayResults[r.id].error}>replay failed</span>
                   )
@@ -295,6 +304,9 @@ export default function App() {
       </footer>
 
       {detailRow && <CallDetail row={detailRow} onClose={() => setDetailRow(null)} />}
+      {replayModalId != null && replayResults[replayModalId]?.result && (
+        <ReplayModal result={replayResults[replayModalId].result} onClose={() => setReplayModalId(null)} />
+      )}
     </div>
   );
 }

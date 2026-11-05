@@ -32,6 +32,11 @@ const { HANDLER_TIMEOUT_MS } = require('./invoke');
 // the loopback client a small margin so the engine always answers first.
 const REPLAY_TIMEOUT_MS = HANDLER_TIMEOUT_MS + 5_000;
 
+// The webhook's answer is captured (transient — NOT stored in the call log)
+// so the dashboard can show it in a modal. Bounded so a huge handler reply
+// can't balloon the /api/calls/:id/replay JSON.
+const MAX_CAPTURED_RESPONSE_BYTES = 64 * 1024;
+
 // Headers never copied verbatim from the stored snapshot: hop-by-hop or
 // replaced with fresh replay-appropriate values below.
 const SKIP_HEADERS = new Set([
@@ -92,15 +97,39 @@ function buildReplayHeaders(call, { callerAuthorization, genericAuth, rawBody, c
   return headers;
 }
 
-/** One loopback HTTP round-trip; resolves with the webhook's answer. */
+/** One loopback HTTP round-trip; resolves with the webhook's answer.
+ *  The response body/headers are captured (up to MAX_CAPTURED_RESPONSE_BYTES,
+ *  flagged with `bodyTruncated` when cut) purely for the API caller's viewer —
+ *  the call log still only records the REQUEST side. */
 function sendReplay({ port, method, path, headers, body }) {
   return new Promise((resolve, reject) => {
     const req = http.request(
       { host: '127.0.0.1', port, method, path, headers, timeout: REPLAY_TIMEOUT_MS },
       (res) => {
+        const chunks = [];
         let bytes = 0;
-        res.on('data', (c) => { bytes += c.length; });
-        res.on('end', () => resolve({ status: res.statusCode || 0, responseBytes: bytes }));
+        let captured = 0;
+        let truncated = false;
+        res.on('data', (c) => {
+          bytes += c.length;
+          if (captured < MAX_CAPTURED_RESPONSE_BYTES) {
+            const slice = c.subarray(0, MAX_CAPTURED_RESPONSE_BYTES - captured);
+            chunks.push(slice);
+            captured += slice.length;
+            if (bytes > MAX_CAPTURED_RESPONSE_BYTES) truncated = true;
+          } else {
+            truncated = true;
+          }
+        });
+        res.on('end', () =>
+          resolve({
+            status: res.statusCode || 0,
+            responseBytes: bytes,
+            headers: res.headers || {},
+            body: Buffer.concat(chunks).toString('utf8'),
+            truncated,
+          })
+        );
       }
     );
     req.on('timeout', () => req.destroy(new Error(`replay timed out after ${REPLAY_TIMEOUT_MS}ms`)));
@@ -121,8 +150,10 @@ function sendReplay({ port, method, path, headers, body }) {
  * @param {typeof import('./db')} opts.db db module (Prisma access stays here)
  * @param {object} opts.logger logger (uses .child())
  * @returns {Promise<object>} { notFound } or
- *   { original, status, responseBytes, call } — `call` is the freshly
- *   recorded replay row, or null when recording failed (e.g. DB hiccup).
+ *   { original, status, responseBytes, response, call } — `response` is the
+ *   webhook's captured answer ({ status, headers, body, truncated }, transient,
+ *   never persisted); `call` is the freshly recorded replay row, or null when
+ *   recording failed (e.g. DB hiccup).
  *   Throws Prisma errors (P1001...) when the database is unavailable.
  */
 async function replayCall({ callId, port, callerAuthorization, genericAuth, db, logger }) {
@@ -153,7 +184,13 @@ async function replayCall({ callId, port, callerAuthorization, genericAuth, db, 
   }
   if (!call) child.warn(`replay of #${callId} answered ${sent.status}, but no new call row appeared`);
 
-  return { original, status: sent.status, responseBytes: sent.responseBytes, call };
+  return {
+    original,
+    status: sent.status,
+    responseBytes: sent.responseBytes,
+    response: { status: sent.status, headers: sent.headers, body: sent.body, truncated: sent.truncated },
+    call,
+  };
 }
 
-module.exports = { replayCall, REPLAY_TIMEOUT_MS, buildTargetPath, buildReplayHeaders };
+module.exports = { replayCall, REPLAY_TIMEOUT_MS, MAX_CAPTURED_RESPONSE_BYTES, buildTargetPath, buildReplayHeaders };
