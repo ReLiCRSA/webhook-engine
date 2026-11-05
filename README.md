@@ -76,6 +76,7 @@ All config comes from the environment (loaded from `.env`):
 | `AUTH_MODE`           | `bearer`                            | `bearer` \| `hmac` \| `hmac,bearer`. **Empty = generic auth disabled** (engine starts with a warning; endpoints without their own auth stay open and are listed at startup). With both modes set, a request must satisfy *both*. |
 | `AUTH_BEARER_TOKEN`   | —                                   | Token for `Authorization: Bearer <token>` (bearer mode). |
 | `AUTH_HMAC_SECRETS`   | —                                   | Comma-separated secrets for `X-Signature` (hmac mode). The header must equal `HMAC-SHA256(rawBody, secret)` hex for **at least one** configured secret — multiple secrets enable rotation (old secrets stay valid until removed from the list). |
+| `DISABLE_TEST_WEBHOOKS` | empty (tests served)              | `true`/`1`/`yes` stops the built-in test webhooks (`example`, `open`, `gated`) from being discovered: requests to them 404 like unknown webhooks (`auth=denied` rows) and they vanish from the startup log and `GET /api/webhooks`. Re-read per request — flip it without a restart under nodemon. |
 
 Notes:
 

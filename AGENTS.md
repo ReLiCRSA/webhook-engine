@@ -70,7 +70,8 @@ broken.
 ## Verification matrix
 
 Run against a live server (defaults from `.env`: `AUTH_MODE=bearer`,
-`AUTH_BEARER_TOKEN=dev-token-change-me`). All rows must hold:
+`AUTH_BEARER_TOKEN=dev-token-change-me`, `DISABLE_TEST_WEBHOOKS` **unset**).
+All rows must hold:
 
 | # | Request | Expected status | Expected `auth` in DB row |
 |---|---------|-----------------|---------------------------|
@@ -96,6 +97,10 @@ Invariants to re-check after any change:
 - Startup log prints one line per webhook with its effective auth posture
   (`module` / `generic (config.json useGlobalAuth)` / `OPEN: no auth`), and
   lists open webhooks as warnings.
+- With `DISABLE_TEST_WEBHOOKS=true`: startup prints a "test webhooks disabled"
+  line, the built-in webhooks (`example`, `open`, `gated`) are absent from the
+  startup log and `GET /api/webhooks`, and requests to them 404 like unknown
+  webhooks (`auth=denied`). Unset: the full matrix above must pass.
 - `GET /` serves the built dashboard only when `web/dist` exists **before**
   the engine starts (otherwise the placeholder page is shown — restart needed
   after a build).

@@ -44,6 +44,11 @@ async function main() {
   }
 
   // Discover webhooks once at startup and report auth posture.
+  if (discover.testWebhooksDisabled()) {
+    startup.info(
+      `test webhooks disabled (DISABLE_TEST_WEBHOOKS) — not serving: ${[...discover.TEST_WEBHOOKS].join(', ')}`
+    );
+  }
   const webhooks = discover.listWebhooks();
   if (webhooks.length === 0) {
     startup.warn('no webhooks found under webhooks/');

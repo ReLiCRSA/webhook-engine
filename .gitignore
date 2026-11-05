@@ -1,0 +1,12 @@
+node_modules/
+.env
+.env.local
+
+# graphify knowledge graph (local build output)
+graphify-out/
+
+# webhooks: keep only the project ones (example, open, gated)
+webhooks/*
+!webhooks/example/
+!webhooks/open/
+!webhooks/gated/

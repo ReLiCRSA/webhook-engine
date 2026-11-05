@@ -135,4 +135,4 @@ function mapRow(r) {
   };
 }
 
-module.exports = { getPrisma, ping, recordWebhookCall, listCalls };
+module.exports = { getPrisma, ping, recordWebhookCall, listCalls, resolveDatabaseUrl };

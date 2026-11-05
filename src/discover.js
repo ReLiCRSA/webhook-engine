@@ -18,6 +18,20 @@ const path = require('path');
 
 const WEBHOOKS_DIR = path.join(__dirname, '..', 'webhooks');
 
+/**
+ * Built-in test webhooks (the demo endpoints from the AGENTS.md verification
+ * matrix). Set DISABLE_TEST_WEBHOOKS=true|1|yes to keep them from being
+ * discovered: they then behave exactly like unknown webhooks (404,
+ * auth=denied) and never show up in the startup log or GET /api/webhooks.
+ * The flag is re-read per lookup (like config.json), so it can be flipped
+ * without a restart under nodemon.
+ */
+const TEST_WEBHOOKS = new Set(['example', 'open', 'gated']);
+
+function testWebhooksDisabled() {
+  return ['true', '1', 'yes'].includes(String(process.env.DISABLE_TEST_WEBHOOKS || '').trim().toLowerCase());
+}
+
 let lastDirMtimeMs = 0;
 
 function dirHasChanged() {
@@ -59,9 +73,13 @@ function scan() {
 }
 
 /** List webhook directories (re-scanning when the dir's mtime changed). */
+let cachedWebhooks = null;
+
 function listWebhooks() {
-  if (dirHasChanged() || lastDirMtimeMs === 0) return scan();
-  return scan(); // keep it simple; stat + readdir of a tiny dir is negligible
+  if (!cachedWebhooks || dirHasChanged()) cachedWebhooks = scan();
+  return testWebhooksDisabled()
+    ? cachedWebhooks.filter((w) => !TEST_WEBHOOKS.has(w.name))
+    : cachedWebhooks;
 }
 
 /** Load (and cache) a module's handler/auth exports from its index.js. */
@@ -104,4 +122,11 @@ function getWebhook(name) {
   return { name: found.name, dir: found.dir, config: found.config, module: loadModule(found.name) };
 }
 
-module.exports = { listWebhooks, loadModule, getWebhook, WEBHOOKS_DIR };
+module.exports = {
+  listWebhooks,
+  loadModule,
+  getWebhook,
+  testWebhooksDisabled,
+  TEST_WEBHOOKS,
+  WEBHOOKS_DIR,
+};
