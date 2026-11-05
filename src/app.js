@@ -38,6 +38,28 @@ async function captureRawBody(req) {
   return raw;
 }
 
+/**
+ * config.json may carry module secrets (webhook secrets, API tokens). The
+ * dashboard API must never echo them: string values under keys that look
+ * secret-bearing (secret/token/password/key/credential/signature…) are
+ * replaced with '***'. Keys ending in Comment/Help are documentation-only
+ * and pass through. Structure and non-secret settings stay visible.
+ */
+const SECRET_KEY_RE = /(secret|token|password|passwd|credential|apikey|api_key|authorization|signature|access_key|private_key)/i;
+const DOC_KEY_RE = /(comment|help|note|description|instructions)$/i;
+
+function redactConfig(value, key = '') {
+  if (Array.isArray(value)) return value.map((v) => redactConfig(v, key));
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) out[k] = redactConfig(v, k);
+    return out;
+  }
+  if (DOC_KEY_RE.test(key)) return value;
+  if (SECRET_KEY_RE.test(key) && value != null && value !== '') return '***';
+  return value;
+}
+
 /** Generic-auth gate for /api/* and anything else marked protected. */
 function makeAuthGuard(genericAuth, logger) {
   return async function guard(req, res, next) {
@@ -97,7 +119,7 @@ function createApp({ logger, genericAuth, port }) {
       if (mod && typeof mod.auth === 'function') authMode = 'module';
       else if (config.useGlobalAuth === true) authMode = genericAuth ? 'generic' : 'none (global auth disabled)';
       else authMode = 'none';
-      return { name: w.name, auth: authMode, config };
+      return { name: w.name, auth: authMode, config: redactConfig(config) };
     });
     res.json({ webhooks });
   });
