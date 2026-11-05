@@ -44,6 +44,21 @@ function dirHasChanged() {
   return stat.mtimeMs !== lastDirMtimeMs;
 }
 
+/**
+ * Read + parse webhooks/<name>/config.json ('{}' when absent). Invalid JSON
+ * is logged and treated as {} so a typo cannot take a webhook down.
+ */
+function readConfig(dir) {
+  const configPath = path.join(dir, 'config.json');
+  if (!fs.existsSync(configPath)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  } catch (e) {
+    console.error(`[discover] ${path.basename(dir)}: invalid config.json: ${e.message}`);
+    return {};
+  }
+}
+
 function scan() {
   lastDirMtimeMs = 0;
   let entries = [];
@@ -58,16 +73,7 @@ function scan() {
     const dir = path.join(WEBHOOKS_DIR, entry.name);
     const index = path.join(dir, 'index.js');
     if (!fs.existsSync(index)) continue;
-    const configPath = path.join(dir, 'config.json');
-    let config = {};
-    if (fs.existsSync(configPath)) {
-      try {
-        config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-      } catch (e) {
-        console.error(`[discover] ${entry.name}: invalid config.json: ${e.message}`);
-      }
-    }
-    out.push({ name: entry.name, dir, config });
+    out.push({ name: entry.name, dir, config: readConfig(dir) });
   }
   return out;
 }
@@ -113,13 +119,16 @@ function loadModule(name) {
  * index.js exports (null when the directory does not exist, or the exports
  * are cached from require()).
  *
- * Note: config.json is re-read on every call (cheap), so editing it does
- * not require a restart.
+ * config.json is re-read on EVERY call (cheap), so editing it does not
+ * require a restart — this holds for in-place edits too, which leave the
+ * cached scan entries (listWebhooks) untouched. Handlers get this fresh
+ * config as ctx.config (see invoke.js), making config.json a live
+ * module-owned settings file, not just engine plumbing.
  */
 function getWebhook(name) {
   const found = listWebhooks().find((w) => w.name === name);
   if (!found) return null;
-  return { name: found.name, dir: found.dir, config: found.config, module: loadModule(found.name) };
+  return { name: found.name, dir: found.dir, config: readConfig(found.dir), module: loadModule(found.name) };
 }
 
 module.exports = {

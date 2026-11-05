@@ -27,9 +27,18 @@ module.exports = {
   },
 
   async handler(ctx, req, res) {
-    // Echo everything the engine normalized, so you can watch traffic shapes
-    // in the dashboard (and the Postgres call log).
+    // Module-owned config lives in webhooks/example/config.json — the engine
+    // re-reads it on every request and hands it to us as ctx.config ({} when
+    // absent). So editing "settings.response" changes this reply live, with
+    // no restart. The engine itself only reads "useGlobalAuth".
+    const settings = (ctx.config && ctx.config.settings) || {};
+    const response = settings.response || { message: 'hello world (add settings.response to config.json)' };
+
     res.status(200).json({
+      // The configured reply comes first (top level): {"message":"hello solar system",...}
+      ...response,
+      // Then everything the engine normalized, so you can still watch traffic
+      // shapes in the dashboard (and the Postgres call log).
       webhook: ctx.webhook,
       method: ctx.method,
       path: ctx.path,

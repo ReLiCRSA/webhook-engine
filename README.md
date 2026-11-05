@@ -127,6 +127,8 @@ ctx = {
   method,               // upper-cased HTTP method
   path,                 // full request URL path, no query string
   query,                // parsed query params; {} when empty
+  config,               // webhooks/<name>/config.json — live, re-read per
+                        // request, {} when the file is absent (see below)
   body: {
     url:  { … },           // application/x-www-form-urlencoded; {} when not sent
     post: { … },           // multipart/form-data (multipart-parser); {} when not sent
@@ -173,6 +175,26 @@ in:
 With that flag, the engine applies its env-configured generic auth
 (bearer/hmac/both), so `/webhook/my-hook` follows `AUTH_*` settings with zero
 code.
+
+`config.json` is also the **module's own live settings file**: the engine only
+interprets `useGlobalAuth`, every other key is yours, and the whole parsed
+file is handed to `auth(ctx)`/`handler` as `ctx.config` — re-read on every
+request, so edits take effect without a restart. A convention like a
+`settings` namespace keeps module keys separate from engine keys:
+
+```json
+{
+  "useGlobalAuth": false,
+  "settings": { "response": { "message": "hello solar system" } }
+}
+```
+
+```js
+async handler(ctx, req, res) {
+  const reply = (ctx.config.settings || {}).response || { message: 'no config' };
+  res.status(200).json(reply); // edits to config.json change the reply live
+}
+```
 
 ### Auth decision order (per webhook)
 

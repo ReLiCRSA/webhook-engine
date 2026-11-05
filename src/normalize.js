@@ -12,6 +12,8 @@
  *     method,           // normalized upper-case HTTP method
  *     path,             // full request URL path (no query string)
  *     query,            // parsed query parameters, {} when empty
+ *     config,           // webhooks/<name>/config.json (live, re-read per
+ *                       // request); added by invoke.js, not present here
  *     body: {
  *       url:  {...} | {},        // parsed application/x-www-form-urlencoded
  *       post: {...} | {},        // parsed multipart/form-data (multipart-parser)

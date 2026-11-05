@@ -120,6 +120,10 @@ async function invoke({ req, res, webhookName, rawBody, ctx, db, logger, discove
     return;
   }
 
+  // Live module config: config.json re-read this very request by
+  // discover.getWebhook ({} when absent). Visible to auth(ctx) and handler.
+  ctx.config = entry.config || {};
+
   if (typeof mod.auth === 'function') {
     // Module-provided auth REPLACES global auth for this webhook.
     let ok = false;

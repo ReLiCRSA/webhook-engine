@@ -88,17 +88,16 @@ function createApp({ logger, genericAuth, port }) {
 
   apiRouter.get('/webhooks', (req, res) => {
     const webhooks = discover.listWebhooks().map((w) => {
-      let mod = null;
-      try {
-        mod = discover.loadModule(w.name);
-      } catch {
-        /* report as unconfigured below */
-      }
+      // getWebhook re-reads config.json fresh (like the request path), so a
+      // config edit is reflected here without a restart too.
+      const entry = discover.getWebhook(w.name);
+      const mod = entry ? entry.module : null;
+      const config = (entry && entry.config) || {};
       let authMode;
       if (mod && typeof mod.auth === 'function') authMode = 'module';
-      else if (w.config && w.config.useGlobalAuth === true) authMode = genericAuth ? 'generic' : 'none (global auth disabled)';
+      else if (config.useGlobalAuth === true) authMode = genericAuth ? 'generic' : 'none (global auth disabled)';
       else authMode = 'none';
-      return { name: w.name, auth: authMode, config: w.config || {} };
+      return { name: w.name, auth: authMode, config };
     });
     res.json({ webhooks });
   });

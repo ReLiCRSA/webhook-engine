@@ -1,3 +1,9 @@
 {
-  "useGlobalAuth": false
+  "useGlobalAuth": false,
+  "settings": {
+    "comment": "settings is this module's own namespace — the engine only reads useGlobalAuth; everything else in config.json is yours. config.json is re-read per request and handed to handler as ctx.config, so edits here change the reply without any restart.",
+    "response": {
+      "message": "hello solar system"
+    }
+  }
 }
