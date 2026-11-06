@@ -1,0 +1,13 @@
+// Model fragment for webhooks/example — assembled into the generation
+// schema by scripts/assemble-schema.js (npm run prisma:generate). Must stay
+// in sync with migrations/20261103095217_example_events/migration.sql
+// (npm run db:check verifies against the live database).
+// Models/enums/types only: no datasource, no generator block.
+
+model ExampleEvent {
+  id        BigInt   @id @default(autoincrement())
+  payload   Json
+  createdAt DateTime @default(now()) @db.Timestamp(3)
+
+  @@map("example_events")
+}

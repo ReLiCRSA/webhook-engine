@@ -9,10 +9,11 @@
     "dev": "nodemon src/server.js",
     "db:up": "docker compose up -d",
     "db:down": "docker compose down",
-    "prisma:generate": "prisma generate",
+    "db:migrate": "node scripts/db-migrate.js",
+    "db:check": "node scripts/db-check.js",
+    "prisma:generate": "node scripts/prisma-generate.js",
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
-    "prisma:studio": "prisma studio",
     "prisma:studio": "node scripts/prisma-studio.js",
     "web:dev": "npm --prefix web run dev",
     "web:build": "npm --prefix web run build"

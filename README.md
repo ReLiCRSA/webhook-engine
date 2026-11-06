@@ -224,8 +224,12 @@ async handler(ctx, req, res) {
 }
 ```
 
-If a module needs its own model, add it to `prisma/schema.prisma` and run
-`npm run prisma:generate` — it stays available through the shared client.
+If a module needs a table it owns *end-to-end* (schema history in the engine's
+hands), add the model to `prisma/schema.prisma` and run `npm run
+prisma:generate` — it stays available through the shared client. If it owns
+its migrations too (see "Per-webhook database migrations" below), it ships a
+`model.prisma` fragment instead and `npm run prisma:generate` picks it up
+automatically.
 
 ## Request lifecycle
 
@@ -362,8 +366,19 @@ running Docker daemon.
 - `npm run db:down` — `docker compose down` (stops and removes the
   container; the `pgdata` volume and its data are kept).
   `npm run db:down -- -v` also removes stored data.
+- `npm run db:migrate` (`scripts/db-migrate.js`) — applies **all** migrations:
+  engine baseline via `prisma migrate deploy`, then every webhook extension,
+  oldest first (see "Per-webhook database migrations" below). Idempotent.
+  Ends by regenerating the Prisma client from the assembled schema (engine +
+  every `webhooks/<name>/model.prisma` fragment) so typed extension models
+  can't lag behind the applied DDL; skip with `npm run db:migrate -- --skip-generate`.
+- `npm run db:check` (`scripts/db-check.js`) — read-only drift guard: diffs the
+  live database against the assembled *generation* schema (engine schema plus
+  every `webhooks/<name>/model.prisma` fragment). Exit 0 = no drift, 1 = drift
+  (the printed diff lists the delta). Needs a reachable database.
 - `npm run prisma:deploy` (`prisma migrate deploy`) — the safe, non-interactive
-  apply path (see "Prisma CLI with the split env vars" below).
+  apply path for **engine migrations only** (see "Prisma CLI with the split env
+  vars" below).
 - `npm run prisma:migrate` (`prisma migrate dev`) is **interactive only**
   (Prisma ≥ 5 refuses it without a TTY) and **drift-detects against webhook
   extension tables**, offering to *reset the whole schema*, wiping all data.
@@ -408,13 +423,16 @@ npx prisma migrate diff \
 ⚠️ Once any webhook extension tables exist, this diff will list them (it
 wants to `DROP` them — that's not real drift, it's the per-webhook
 extensions below). That's exactly why `prisma migrate dev` must stay off the
-table.
+table — and why drift checks against extension tables should use
+`npm run db:check`, which diffs against the *assembled* schema (engine +
+`webhooks/<name>/model.prisma` fragments) instead.
 
 ## Per-webhook database migrations
 
 Webhooks can own database migrations in their own directory, alongside the
-engine's Prisma migrations. This is a **manual, documented flow** (no engine
-code or npm script is involved — by design):
+engine's Prisma migrations. They are applied by the same `npm run db:migrate`
+as the engine's (`scripts/db-migrate.js` — a thin script implementing the
+documented flow below; no engine code is involved — by design):
 
 ```
 webhooks/<name>/migrations/
@@ -452,10 +470,20 @@ COMMIT;
 4. **One transaction:** wrap the DDL in `BEGIN; … COMMIT;`. The engine's
    baseline in `prisma/migrations/` always stays the oldest history — never
    put webhook DDL there.
-5. **No Prisma models.** Extension tables are addressed from modules via
-   `getPrisma().$queryRaw` / `$executeRaw` (below) — they are *not* added to
-   `prisma/schema.prisma`, which keeps the engine's schema the diff/deploy
-   source of truth.
+5. **No Prisma models in the *engine* schema.** Extension tables must not be
+   added to `prisma/schema.prisma` — that keeps the engine's schema the
+   diff/deploy source of truth and `migrate deploy`/`migrate dev` away from
+   DDL they never applied. **The typed client is still available:** ship a
+   `webhooks/<name>/model.prisma` fragment next to the migrations (models/
+   enums/types only, no `datasource`/`generator` block, column names via
+   `@map`/`@@map` mirroring the DDL). `npm run prisma:generate` assembles it
+   with the engine schema into `prisma/generated/schema.prisma` (gitignored
+   build output, `scripts/assemble-schema.js`) and generates typed models —
+   the migration path never sees fragments. `npm run db:check` fails when a
+   fragment drifts from the live database or collides with another model or
+   table name. DDL features Prisma's datamodel can't express (CHECK
+   constraints, partial indexes on Prisma 5) stay in `migration.sql` only —
+   leave them out of the fragment or `db:check` flags them.
 6. **Do not run `prisma migrate dev` after any webhook migration has been
    applied** — it drift-detects the extension tables and offers to reset the
    whole schema (data loss). Only `prisma migrate deploy` is safe; it re-checks
@@ -463,23 +491,65 @@ COMMIT;
 
 ### Applying migrations (engine + webhook, in order)
 
-Two steps; both use the assembled `DATABASE_URL` from
-[Prisma CLI with the split env vars](#prisma-cli-with-the-split-env-vars).
-
-**Step 1 — engine baseline:**
-
 ```bash
-npx prisma migrate deploy
+npm run db:migrate      # scripts/db-migrate.js
 ```
+
+The script does the apply steps in one go (no `DATABASE_URL` export needed — it
+assembles it from the split `DB_*` vars exactly like `src/db.js` does):
+
+**Step 1 — engine baseline:** runs `npx prisma migrate deploy`. If it fails,
+the script stops before touching any webhook migration.
 
 **Step 2 — every remaining migration, engine *and* webhook, oldest first,
 skipping what the ledger already has** (ledger = the `_prisma_migrations`
-table Prisma keeps in the database; `db execute` aborts the whole script on
-any SQL error, so the ledger `INSERT` at the end is only reached when the DDL
-succeeded):
+table Prisma keeps in the database). Each pending migration's DDL body and
+its ledger `INSERT` run in one `pg` transaction — same row shape `migrate
+deploy` would write (checksum = sha256 of `migration.sql`; deploy tolerates
+rows it does not know about) — so a failing migration rolls back completely,
+is **not** recorded, and `db:migrate` exits 1.
+
+**Step 3 — regenerate the Prisma client** from the assembled generation
+schema (`scripts/prisma-generate.js`: engine schema plus every
+`webhooks/<name>/model.prisma` fragment → `prisma/generated/schema.prisma`),
+so typed extension models are up to date the moment the migrate command
+finishes — a fresh clone or a new webhook migration can never leave the
+client one generate behind. A fragment collision fails this step (migrations
+stay applied); fix the fragment and re-run `npm run prisma:generate`.
+Skip with `npm run db:migrate -- --skip-generate` (the manual shell fallback
+below does no generating either).
+
+Behaviour and guards:
+
+- Re-running is a no-op: applied migrations are skipped, unapplied files are
+  applied, a previously failed one is retried. Idempotent by construction.
+- After applying, `npx prisma migrate deploy` stays green ("No pending
+  migrations to apply") and the ledger rows sort chronologically with the
+  engine ones.
+- Aborts with guidance if `_prisma_migrations` contains a *failed* row
+  (`finished_at IS NULL`) — resolve those first (`prisma migrate resolve`).
+- Rejects migration folders that don't match `<14-digit-UTC>_<slug>`,
+  duplicate names, and SQL that isn't exactly one `BEGIN … COMMIT` block.
+- Warns (but proceeds) when a pending migration's timestamp is not newer
+  than the newest applied one (rule 2) — history stops sorting chronologically.
+- Needs the database reachable via the `DB_*` vars (no docker/psql client
+  required — `pg`, already a dependency, does the ledger lookups).
+
+<details>
+<summary>Manual fallback (no script, plain shell)</summary>
+
+Export the assembled `DATABASE_URL` first
+([Prisma CLI with the split env vars](#prisma-cli-with-the-split-env-vars)),
+then:
 
 ```bash
-# requires docker for the ledger lookups (host psql is not needed)
+# Step 1 — engine baseline
+npx prisma migrate deploy
+
+# Step 2 — remaining migrations, oldest first; requires docker for the
+# ledger lookups (host psql is not needed); `db execute` aborts the whole
+# script on any SQL error, so the ledger INSERT is only reached when the
+# DDL succeeded
 for f in prisma/migrations/*/migration.sql webhooks/*/*/*/migration.sql; do
   [ -f "$f" ] || continue
   name=$(basename "$(dirname "$f")")
@@ -491,9 +561,6 @@ for f in prisma/migrations/*/migration.sql webhooks/*/*/*/migration.sql; do
   fi
   checksum=$(sha256sum "$f" | cut -d' ' -f1)
   { cat "$f"
-    # record the migration in Prisma's ledger — same row shape `migrate deploy`
-    # would write (checksum = sha256 of migration.sql; deploy tolerates rows
-    # it does not know about)
     printf 'INSERT INTO "_prisma_migrations"
             (id, checksum, started_at, finished_at, migration_name, applied_steps_count)
             SELECT gen_random_uuid(), %s, now(), now(), %s, 1
@@ -504,46 +571,55 @@ for f in prisma/migrations/*/migration.sql webhooks/*/*/*/migration.sql; do
 done
 ```
 
-- Runs with `DB_*` vars exported (from the `export DATABASE_URL=…` block
-  above), and with the Postgres container up.
-- `npx prisma db execute --stdin` needs no client config and takes the whole
-  script (DDL + ledger `INSERT`) in one shot.
-- Re-running is a no-op: applied migrations are skipped, unapplied files are
-  applied. Idempotent by construction.
-- After applying, `npx prisma migrate deploy` stays green ("No pending
-  migrations to apply") and the ledger rows sort chronologically with the
-  engine ones.
+</details>
 
 ### Using extension tables from a module
 
-All DB access still goes through the Prisma client — no extra dependency:
+All DB access still goes through the Prisma client — no extra dependency.
+When the table's webhook ships its `model.prisma` fragment and
+`npm run prisma:generate` has been run, modules get a **typed model**:
 
 ```js
 const { getPrisma } = require('../../src/db');
 
 async handler(ctx, req, res) {
   const db = getPrisma();
-  const payload = JSON.stringify({ event: 'created', data: ctx.body.json });
-  const ins = await db.$queryRaw`INSERT INTO example_events (payload)
-                       VALUES (${payload}::jsonb) RETURNING id`;
-  const rows = await db.$queryRaw`SELECT id, payload, "createdAt"
-                       FROM example_events ORDER BY id DESC LIMIT 10`;
-  res.json({ stored: ins[0].id, recent: rows });
+  const created = await db.exampleEvent.create({
+    data: { payload: { event: 'created', data: ctx.body.json } },
+  });
+  const recent = await db.exampleEvent.findMany({
+    orderBy: { id: 'desc' }, take: 10,
+  });
+  res.json({ stored: String(created.id), recent });
 }
 ```
 
-Notes:
+- BigInt ids (`@default(autoincrement())` on `BigInt`) come back as `BigInt`
+  — `String(...)` them before `res.json()`.
+- Workflow for a new table: add the migration folder **and** the matching
+  `model.prisma` fragment, then `npm run db:migrate` — it applies the DDL and
+  regenerates the client in one command; `npm run db:check` proves fragment
+  and applied DDL agree.
 
-- Cast JSONB literals: `::jsonb` (string parameters are of type `text`).
-- Quote Prisma-style column names (`"createdAt"`) in raw SQL.
-- `$executeRaw` has no result set — use it for pure DML.
-- Raw queries are untyped; validate shape before trusting results.
+The raw API is still there as an escape hatch (complex upserts, DB features
+the fragment can't express) — cast JSONB parameters with `::jsonb` (string
+parameters arrive as `text`) and quote Prisma-style column names:
+
+```js
+const ins = await db.$queryRaw`INSERT INTO example_events (payload)
+                     VALUES (${JSON.stringify({ event: 'created' })}::jsonb)
+                     RETURNING id`;
+```
+
+`$executeRaw` has no result set — use it for pure DML.
 
 ### Troubleshooting
 
 - `prisma migrate dev` / `migrate diff` reporting webhook tables as drift (or
-  offering a schema reset): expected — the extensions are on purpose
-  (rule 6); use `migrate deploy` and the ledger check instead.
+  offering a schema reset): expected when comparing against the *engine*
+  schema — the extensions are on purpose (rules 5–6); use `migrate deploy`
+  and `npm run db:check` (which compares against the assembled schema)
+  instead.
 - A webhook table exists but its ledger row is missing (e.g. the DDL was
   applied by hand through `psql`): insert the ledger row with the same
   `INSERT` from step 2 (guarded by `WHERE NOT EXISTS`) — `prisma migrate
@@ -556,6 +632,10 @@ Notes:
 With the default `.env` (`AUTH_MODE=bearer`, token `dev-token-change-me`):
 
 ```bash
+npm run db:migrate   # exit 0, "up to date" on a migrated database
+npm run db:check     # exit 0, "no drift" when model.prisma fragments match
+                     # the live database (exit 1 lists the diff)
+
 B=http://127.0.0.1:3000
 T='Authorization: Bearer dev-token-change-me'
 

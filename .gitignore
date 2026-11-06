@@ -2,6 +2,9 @@ node_modules/
 .env
 .env.local
 
+# assembled Prisma schema (build output of npm run prisma:generate)
+prisma/generated/
+
 # graphify knowledge graph (local build output)
 graphify-out/
 

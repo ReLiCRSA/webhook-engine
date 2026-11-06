@@ -19,18 +19,27 @@ broken.
    failure → 401 (`auth=denied`); unknown webhook → 404 (`auth=denied`, row
    stores the requested name). `/api/*` is always gated by generic auth.
 4. **All DB access goes through the Prisma client** (`src/db.js` — singleton
-   `getPrisma()`). No hand-written SQL in engine or modules. New models go in
-   `prisma/schema.prisma` + `npm run prisma:migrate`. **Module-owned extension
-   tables are the exception to "no raw SQL":** they live in
+   `getPrisma()`). No hand-written SQL in engine or modules. New engine models
+   go in `prisma/schema.prisma` + `npm run prisma:migrate`. **Module-owned
+   extension tables are the exception to "no raw SQL":** they live in
    `webhooks/<name>/migrations/<timestamp>_<slug>/migration.sql` (plain
    Postgres DDL in one `BEGIN … COMMIT`, UTC timestamp strictly newer than
-   every row in `_prisma_migrations`, append-only — never renamed/backdated),
-   and are accessed only via `getPrisma().$queryRaw` / `$executeRaw`. They are
-   **not** Prisma models (never added to `prisma/schema.prisma`), and
+   every row in `_prisma_migrations`, append-only — never renamed/backdated).
+   Each such webhook also ships a `webhooks/<name>/model.prisma` fragment
+   (models/enums/types only, no `datasource`/`generator` block, `@map`/`@@map`
+   mirroring the DDL): `npm run prisma:generate` (`scripts/prisma-generate.js`)
+   assembles engine schema + fragments into `prisma/generated/schema.prisma`
+   (build output, gitignored) so modules get typed models
+   (`getPrisma().exampleEvent`) — `npm run db:migrate` also runs it as its
+   final step (skip with `npm run db:migrate -- --skip-generate`) —
+   and `npm run db:check` fails on fragment/DB
+   drift or model/table collisions. Fragments must **never** be merged into
+   `prisma/schema.prisma`: the migration path (`prisma migrate deploy`,
+   `npm run db:migrate`) deliberately uses the engine-only schema, and
    `prisma migrate dev` must not run against a database that has webhook
    extensions — it drift-detects them and offers a full schema reset
    (data loss); only `prisma migrate deploy` (no-op, tolerates unknown ledger
-   rows) + the two-step apply flow from the README is safe.
+   rows) + `npm run db:migrate` (or the README's manual apply flow) is safe.
 5. **Record every webhook call** (success, auth failure, unknown webhook) via
    `recordWebhookCall(ctx, status, auth, durationMs)` *after* the response
    ends. Recording errors are logged, never thrown into the request path.
@@ -113,4 +122,12 @@ Invariants to re-check after any change:
 - With `LOG_SINKS=stdout,file,logstash`: file sink lines are identical to
   stdout; the logstash sink delivers NDJSON batches (no crash on flush
   failure when the endpoint is down).
+- `npm run prisma:generate` prints one fragment line per
+  `webhooks/<name>/model.prisma`, assembles engine schema + fragments into
+  `prisma/generated/schema.prisma`, and the generated client exposes typed
+  models for extension tables (e.g. `exampleEvent`, `productboardEntityLink`);
+  a model/table collision exits 1 without generating. `npm run db:check`
+  exits 0 on a fully migrated database. `npm run db:migrate` finishes with
+  that same client regeneration (its step 3), and `npm run db:migrate --
+  --skip-generate` omits it.
 - `node --check` passes on every `src/*.js`.
