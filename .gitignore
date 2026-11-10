@@ -1,12 +1,16 @@
 node_modules/
 .env
 .env.local
+.vscode/
 
 # assembled Prisma schema (build output of npm run prisma:generate)
 prisma/generated/
 
 # graphify knowledge graph (local build output)
 graphify-out/
+
+# generated webhook test payloads (contain real workspace ids/emails)
+test-payloads/
 
 # webhooks: keep only the project ones (example, open, gated)
 webhooks/*
