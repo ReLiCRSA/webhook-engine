@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { api, getToken, setToken } from './api.js';
 import CallDetail from './CallDetail.jsx';
 import ReplayModal from './ReplayModal.jsx';
+import TokensModal from './TokensModal.jsx';
 
 const PAGE = 100;
 const REFRESH_MS = 5000;
@@ -43,6 +44,8 @@ export default function App() {
   const [replayResults, setReplayResults] = useState({}); // callId -> { ok, status, newId, error, result }
   const [replayModalId, setReplayModalId] = useState(null); // callId whose replay-result modal is open
   const [detailRow, setDetailRow] = useState(null); // row shown in the data-detail modal
+  const [principal, setPrincipal] = useState(null); // /api/whoami: { source: master|db-token|hmac|none }
+  const [tokensOpen, setTokensOpen] = useState(false); // tokens modal (master-only entry)
 
   const askForToken = useCallback(() => {
     setPrompting(true);
@@ -122,6 +125,15 @@ export default function App() {
       .catch(() => { /* handled via /calls 401 */ });
   }, [token]);
 
+  // Who did this token authenticate as? Only the env master may manage db
+  // bearer tokens — the entry button appears for masters only (the server
+  // enforces the same rule with a 403 regardless of what this UI shows).
+  useEffect(() => {
+    api('/api/whoami', { token })
+      .then((d) => setPrincipal(d.principal || null))
+      .catch(() => setPrincipal(null));
+  }, [token]);
+
   // Initial load + auto-refresh.
   useEffect(() => {
     setRefreshing(true);
@@ -165,6 +177,11 @@ export default function App() {
             token <code>{token ? `${token.slice(0, 4)}…` : 'none'}</code>
             <button className="link" onClick={() => askForToken()}>change</button>
           </label>
+          {principal && principal.source === 'master' && (
+            <button onClick={() => setTokensOpen(true)} title="manage db bearer tokens (master token only)">
+              tokens
+            </button>
+          )}
           <label className="checkbox">
             <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
             auto-refresh ({REFRESH_MS / 1000}s)
@@ -307,6 +324,7 @@ export default function App() {
       {replayModalId != null && replayResults[replayModalId]?.result && (
         <ReplayModal result={replayResults[replayModalId].result} onClose={() => setReplayModalId(null)} />
       )}
+      {tokensOpen && <TokensModal token={token} onClose={() => setTokensOpen(false)} />}
     </div>
   );
 }

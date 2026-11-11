@@ -40,3 +40,27 @@ model WebhookCall {
   @@index([replayedFromId])
   @@map("webhook_calls")
 }
+
+/// Engine-managed API bearer tokens (dashboard/API credentials).
+/// The env master (AUTH_BEARER_TOKEN) is not stored here — it stays in env.
+/// Plaintext tokens are NEVER persisted: token_hash is sha256(token), the
+/// plaintext is returned exactly once at creation.
+model ApiToken {
+  id         BigInt    @id @default(autoincrement())
+  /// Human-readable label ("ci-deploy", "laptop", …).
+  name       String
+  /// sha256 hex of the token; the lookup key at auth time. Never exposed by the API.
+  tokenHash  String    @unique
+  /// First ~10 chars of the plaintext (e.g. "whk_3f9a1c") for display/identification only.
+  prefix     String
+  /// Null = never expires. Past dates reject the token at auth time.
+  expiresAt  DateTime?
+  /// Soft revoke: set instead of deleting the row (audit trail).
+  revokedAt  DateTime?
+  /// Best-effort, throttled (~1/min per token) marker of recent use.
+  lastUsedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([name])
+  @@map("api_tokens")
+}

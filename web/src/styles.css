@@ -44,7 +44,7 @@ h1 { font-size: 20px; margin: 0; }
   flex-wrap: wrap;
 }
 
-select, input[type='date'], input[type='password'] {
+select, input[type='date'], input[type='password'], input[type='text'] {
   background: var(--panel);
   color: var(--text);
   border: 1px solid var(--border);
@@ -258,3 +258,42 @@ pre.raw-body {
 .jt-val.t-null, .jt-val.t-undefined { color: var(--muted); font-style: italic; }
 .jt-longstr { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
 .jt-longstr.expanded { white-space: pre-wrap; word-break: break-word; }
+
+/* --- tokens modal ------------------------------------------------------ */
+.tok-reveal {
+  margin: 12px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--ok);
+  border-radius: 8px;
+  background: rgba(63, 185, 80, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tok-reveal-title { font-size: 12px; color: var(--muted); }
+.tok-plaintext {
+  font-size: 15px;
+  color: var(--ok);
+  user-select: all;
+  word-break: break-all;
+}
+.tok-form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 12px 0;
+}
+.tok-form input[type='text'] { flex: 1; min-width: 180px; }
+.tok-table { margin-top: 4px; }
+.tok-table code { color: var(--accent); }
+.tok-badge {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+}
+.tok-badge.active { color: var(--ok); border-color: var(--ok); }
+.tok-badge.expired { color: var(--warn); border-color: var(--warn); }
+.tok-badge.revoked { color: var(--bad); border-color: var(--bad); }
+button.revoke-confirm { color: var(--bad); border-color: var(--bad); }

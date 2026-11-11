@@ -45,14 +45,16 @@ src/            engine core
   app.js        Express app: routing, raw-body capture, /api router, static web/dist
   discover.js   scans webhooks/ per request (mtime-based), loads index.js modules
   normalize.js  buildContext → { webhook, headers, method, path, query, body }
-  generic-auth.js  bearer + multi-secret HMAC-SHA256 rotation
+  generic-auth.js  bearer + multi-secret HMAC-SHA256 rotation; master / db-token principals
+  api-tokens.js  db-managed bearer tokens (api_tokens): generate/verify/revoke, hashed at rest
   invoke.js     pipeline: auth → handler → response-wrap → record
   db.js         Prisma singleton, call recording, header redaction, listCalls
   logger.js     pluggable logger (stdout | file | logstash)
+test/         engine suites (token store + generic-auth principals, fake Prisma — no DB)
 webhooks/       one directory per webhook; each module is self-contained and
                 self-documenting (own README.md + VALIDATION.md, see below)
 web/            React dashboard (Vite); built output in web/dist, served at /
-prisma/         schema + migrations (WebhookCall model)
+prisma/         schema + migrations (WebhookCall, ApiToken models)
 docker-compose.yml  Postgres 16 on 127.0.0.1:5432 (npm run db:up / db:down)
 ```
 
@@ -75,7 +77,7 @@ All config comes from the environment (loaded from `.env`):
 | `LOG_FILE`            | `./logs/webhook-engine.log`         | Target for the `file` sink. |
 | `LOGSTASH_URL`        | `http://127.0.0.1:9200/_bulk`       | `_bulk` endpoint for the `logstash` sink (NDJSON batches). |
 | `AUTH_MODE`           | `bearer`                            | `bearer` \| `hmac` \| `hmac,bearer`. **Empty = generic auth disabled** (engine starts with a warning; endpoints without their own auth stay open and are listed at startup). With both modes set, a request must satisfy *both*. |
-| `AUTH_BEARER_TOKEN`   | —                                   | Token for `Authorization: Bearer <token>` (bearer mode). |
+| `AUTH_BEARER_TOKEN`   | —                                   | **Master** token for `Authorization: Bearer <token>` (bearer mode). It authenticates everything and is the only credential allowed to manage the db-managed bearer tokens (see “API bearer tokens” below); the master itself is never stored in the database. |
 | `AUTH_HMAC_SECRETS`   | —                                   | Comma-separated secrets for `X-Signature` (hmac mode). The header must equal `HMAC-SHA256(rawBody, secret)` hex for **at least one** configured secret — multiple secrets enable rotation (old secrets stay valid until removed from the list). |
 | `DISABLE_TEST_WEBHOOKS` | empty (tests served)              | `true`/`1`/`yes` stops the built-in test webhooks (`example`, `open`, `gated`) from being discovered: requests to them 404 like unknown webhooks (`auth=denied` rows) and they vanish from the startup log and `GET /api/webhooks`. Re-read per request — flip it without a restart under nodemon. |
 
@@ -276,8 +278,15 @@ Header handling: only `authorization`, `x-signature`, `content-type`,
 | `GET /api/webhooks` | — | Discovered webhooks + effective auth mode (`module` / `generic` / `none`). |
 | `GET /api/calls` | `webhook`, `method`, `status`, `since` (ISO date), `limit` (≤500, default 100), `offset` | Newest-first call rows with total count. |
 | `POST /api/calls/:id/replay` | — | Re-execute recorded call `:id`; returns `{ original, status, responseBytes, response, call }` where `response` is the webhook's captured answer (`{ status, headers, body, truncated }`, transient, never persisted; body capped at 64 KiB) and `call` is the freshly recorded replay row. 404 unknown id, 400 non-numeric id, 503 database unavailable. |
+| `GET /api/whoami` | — | How the caller authenticated: `{ principal: { source: master \| db-token (+tokenId, +name) \| hmac \| none } }`. |
+| `GET /api/tokens` | — | **Master only.** All db bearer tokens (metadata: id, name, prefix, createdAt, expiresAt, revokedAt, lastUsedAt, status). Never the token hash or plaintext. |
+| `POST /api/tokens` | JSON body `{ "name": "...", "expiresAt": "YYYY-MM-DD"? }` | **Master only.** Creates a token (`whk_` + 32 url-safe chars); response `{ token, plaintext }` carries the plaintext — **shown once**, only its sha256 lives at rest. `expiresAt` is the end of that UTC day; omit for never-expiring. 201 created, 400 missing/invalid name or expiry. |
+| `POST /api/tokens/:id/revoke` | — | **Master only.** Soft revoke (sets `revokedAt`, row kept as audit trail). 404 unknown id, 400 non-numeric id. |
 
-All require the generic auth (401 without it).
+All require the generic auth (401 without it). Token management additionally
+requires the **env master bearer token**: db-token and hmac principals get
+403 `{ error: "master token required" }` there but keep full access to every
+other API route (call log, replay, webhooks).
 
 ```bash
 curl 'http://localhost:3000/api/calls?limit=10' \
@@ -288,6 +297,39 @@ curl 'http://localhost:3000/api/calls?webhook=example&status=401' \
 
 curl -X POST 'http://localhost:3000/api/calls/42/replay' \
   -H 'Authorization: Bearer <token>'
+```
+
+### API bearer tokens (db-managed, master-controlled)
+
+Besides the env master (`AUTH_BEARER_TOKEN`), bearer tokens can live in the
+database (`api_tokens`, Prisma model `ApiToken`) — named, optionally expiring,
+revocable **without a restart**, managed through the API above or the
+dashboard's **tokens** modal. Both authenticate generic auth identically
+(`useGlobalAuth` webhooks and `/api/*`, logged as `auth=generic`); only the
+master may manage the table (the dashboard shows the tokens button only when
+`GET /api/whoami` reports `source: master`).
+
+- **Hashed at rest** (rule 7): only `sha256(token)` is stored; the plaintext
+  is returned once in the create response. A lost token is replaced, never
+  recovered. `prefix` (first 10 chars) identifies a row in the UI.
+- **Expiry** is optional (`expiresAt`, a `YYYY-MM-DD` body value means “end
+  of that UTC day”); an expired or revoked token is rejected with 401.
+- **Soft revoke**: `revokedAt` is set, the row stays visible as `revoked`
+  (audit trail).
+- **DB down** (rule 14): token lookup degrades to *no db token works* — the
+  master keeps serving and requests never fail or crash.
+- The per-request log line names the token (`auth=generic token="ci"`); the
+  call-log `auth` column stays exactly `none|generic|module|denied` (rule 15).
+
+```bash
+# create (master only) — the plaintext in the response is the only copy
+curl -X POST 'http://localhost:3000/api/tokens' \
+  -H 'Authorization: Bearer <master>' -H 'Content-Type: application/json' \
+  -d '{"name":"ci-deploy","expiresAt":"2027-01-15"}'
+
+# use it like any bearer token, then revoke through the master
+curl -s 'http://localhost:3000/api/calls?limit=1' -H 'Authorization: Bearer whk_…'
+curl -X POST 'http://localhost:3000/api/tokens/7/revoke' -H 'Authorization: Bearer <master>'
 ```
 
 ### Replay
@@ -357,7 +399,9 @@ localStorage), filterable table (webhook / method / status / since), 100-row
 pages with load-more, 5 s auto-refresh (toggleable), per-row ↻ replay button
 (result + new-row id shown inline, clickable to (re-)open a modal with trees
 of the replay's response and recorded request) and `↻#<id>` badges on
-replayed rows.
+replayed rows. A **tokens** button (visible only when `GET /api/whoami`
+reports the env master) opens a modal to create/name/expire/revoke db bearer
+tokens, with the plaintext token shown once and a copy button.
 
 Development (hot reload; Vite proxies `/api` to `:3000`):
 
@@ -664,6 +708,20 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST $B/webhook/gated -H "$T" -d '{}
 curl -s -o /dev/null -w '%{http_code}\n' $B/api/calls                                                     # 401
 curl -s -o /dev/null -w '%{http_code}\n' $B/                                                             # 200 (dashboard)
 curl -s -X POST $B/api/calls/1/replay -H "$T" | head -c 400                                             # 200; new row with replayedFromId=1
+```
+
+Db-managed bearer tokens (master-only management, plaintext shown once):
+
+```bash
+curl -s $B/api/whoami -H "$T"                                                                                   # 200, principal.source=master
+NEW=$(curl -s -X POST $B/api/tokens -H "$T" -H 'content-type: application/json' \
+  -d '{"name":"smoke","expiresAt":"2030-12-31"}' \
+  | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const j=JSON.parse(d);console.log(j.plaintext+" "+j.token.id)})')
+DT=${NEW% *}; ID=${NEW#* }
+curl -s -o /dev/null -w '%{http_code}\n' -X POST $B/webhook/gated -H "Authorization: Bearer $DT" -d '{}'       # 201, auth=generic
+curl -s -o /dev/null -w '%{http_code}\n' $B/api/tokens -H "Authorization: Bearer $DT"                          # 403 master token required
+curl -s -o /dev/null -w '%{http_code}\n' -X POST $B/api/tokens/$ID/revoke -H "$T"                              # 200, status=revoked
+curl -s -o /dev/null -w '%{http_code}\n' -X POST $B/webhook/gated -H "Authorization: Bearer $DT" -d '{}'       # 401 (revoked)
 ```
 
 HMAC mode, two secrets (rotation in effect):

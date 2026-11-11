@@ -51,7 +51,11 @@ VALIDATION.md) — keep this file module-agnostic.
    (`url`/`post`/`json`) must describe that same body.
 7. **Never store secrets verbatim.** `Authorization` is redacted before
    persistence (`redactAuthorization` in `src/db.js`). Any new header stored
-   for logging must be checked for secret material first.
+   for logging must be checked for secret material first. Db-managed API
+   bearer tokens (`api_tokens`) are stored **hashed** (`tokenHash` =
+   sha256, unique index); the plaintext exists only in the `POST /api/tokens`
+   response (shown once) and the `prefix` column holds display-only first
+   10 chars. No API or dashboard path may return the hash or plaintext.
 8. **Logger contract:** single-argument `log[level]("message")`, scopes via
    `logger.createLogger(...)` children. Keep the line format and the
    structured NDJSON shape of the logstash sink stable; sinks are selected by
@@ -86,7 +90,9 @@ VALIDATION.md) — keep this file module-agnostic.
     per-request retry logging instead.
 15. **Auth values in the call log** are exactly `none | generic | module |
     denied`. Do not introduce new values without updating the dashboard and
-    schema docs.
+    schema docs. Callers authenticated with a db-managed bearer token
+    (`api_tokens`) log as `generic` too — which token authenticated appears
+    in the log **line** only (`auth=generic token="name"`).
 
 ## Verification matrix
 
@@ -117,18 +123,31 @@ Engine rows — run against a live server (defaults from `.env`:
 | 12 | (hmac mode) `POST /webhook/gated` with `X-Signature` from secret A or from rotated secret B | 201 | `generic` |
 | 13 | (hmac mode) `POST /webhook/gated` with wrong `X-Signature` | 401 | `denied` |
 | 14 | (hmac mode) `GET /webhook/open` | 200 | `none` (open webhooks ignore AUTH_MODE) |
-| 15 | `_prisma_migrations` after the demo webhook migration is applied | 3 rows: `20261102224736_init`, `20261103095217_example_events`, `20261105124922_add_replay_column` (chronological) | — |
+| 15 | `_prisma_migrations` after the demo webhook migration is applied | 4 rows: `20261102224736_init`, `20261103095217_example_events`, `20261105124922_add_replay_column`, `20261111101500_add_api_tokens` (chronological) | — |
 | 16 | `npx prisma migrate deploy` after step 15 (with assembled `DATABASE_URL`) | 200 / "No pending migrations to apply", exit 0; `example_events` exists | — |
 | 17 | `POST /api/calls/<row-4-id>/replay` with token | 200 (replay answered 200); new row for `open`, GET, query rebuilt | `none`, `replayedFromId` = id of row 4 |
 | 18 | `POST /api/calls/<row-7-id>/replay` with token | 200 (replay answered 201) | `generic` (replay forwards the **caller's** Authorization; stored originals are redacted), `replayedFromId` set |
 | 19 | `POST /api/calls/999999/replay` with token → 404; without token → 401; `POST /api/calls/abc/replay` with token → 400 | — | (401 stores no row; API is not a webhook) |
 | 20 | (hmac mode) `POST /api/calls/<row-12-id>/replay` with valid API credentials | 200 (replay answered 201) | `generic` (body re-signed with the engine's current secret), `replayedFromId` set |
+| 21 | `GET /api/whoami` with the master token | 200 `principal.source: "master"` | — (API is not a webhook) |
+| 22 | `POST /api/tokens` with master, body `{"name":"e2e","expiresAt":"<future YYYY-MM-DD>"}` | 201; response carries a `whk_…` plaintext (the only copy); `token.expiresAt` = end of that UTC day | — |
+| 23 | `GET`/`POST /api/tokens`, `POST /api/tokens/<id>/revoke` with the **row-22 token** | 403 `master token required` (db tokens never manage the table) | — |
+| 24 | `GET /api/calls` and `POST /webhook/gated` with the row-22 token | 200 / 201 (db tokens have full generic-auth access); `GET /api/whoami` → `source: "db-token"` + name | `generic` (log line names the token) |
+| 25 | `POST /api/tokens/<row-22-id>/revoke` with master, then retry the row-24 requests | 200 (row now `status: revoked`, kept as audit trail); retries → 401; unknown id → 404, non-numeric → 400 | retry row `denied` |
+| 26 | (Postgres stopped) `GET /api/tokens` with master; `POST /webhook/gated` with a db token | 503; 401 — while the master still gets 201 and `/webhook/open` stays up | — |
 
 Invariants to re-check after any change:
 
 - Startup log prints one line per webhook with its effective auth posture
   (`module` / `generic (config.json useGlobalAuth)` / `OPEN: no auth`), and
-  lists open webhooks as warnings.
+  lists open webhooks as warnings. With bearer generic auth the auth line
+  reads `generic auth enabled: bearer token (env master; + db-managed
+  tokens via api_tokens)`.
+- Token management is **master-only**: the dashboard's tokens button appears
+  only when `GET /api/whoami` reports `source: master`; the API answers 403
+  for every other principal (and for `AUTH_MODE` setups without a master).
+  A token's plaintext appears in exactly one response (creation); `GET
+  /api/tokens` exposes metadata only — never `tokenHash` or a plaintext.
 - With `DISABLE_TEST_WEBHOOKS=true`: startup prints a "test webhooks disabled"
   line, the built-in webhooks (`example`, `open`, `gated`) are absent from the
   startup log and `GET /api/webhooks`, and requests to them 404 like unknown
@@ -160,8 +179,10 @@ Invariants to re-check after any change:
 - `node --check` passes on every `src/*.js` **and** every `webhooks/**/*.js`
   (excluding `node_modules`) — module code is loaded in-process, so a syntax
   error there is a runtime failure.
-- `npm test` (the module suites: `node --test "webhooks/*/test/**/*.test.js"`)
-  passes with no database and no network. A module's suites are first-class
+- `npm test` (the engine suite plus the module suites: `node --test
+  "test/**/*.test.js" "webhooks/*/test/**/*.test.js"`) passes with no
+  database and no network — the engine suite runs the token/generic-auth
+  logic against a fake Prisma client. A module's suites are first-class
   deliverables, not extras — which behaviours they pin is module detail,
   stated by that module's README/VALIDATION.md, not by this file.
 - With Postgres stopped (`docker compose stop`), rule 14 extends to modules:

@@ -8,6 +8,9 @@
  *   /api/webhooks          list discovered webhooks + their auth mode
  *   /api/calls?webhook=&method=&status=&since=&limit=&offset=
  *   /api/calls/:id/replay  replay one recorded call (loopback re-dispatch)
+ *   /api/whoami            how this caller authenticated (master|db-token|hmac)
+ *   /api/tokens            db bearer tokens — GET list, POST create, DELETE :id
+ *                          (master-token principals only; other callers 403)
  *   /                       static web/dist (dashboard)
  *
  * The raw request body is always captured first (as a string) so the invoke
@@ -24,6 +27,7 @@ const { createGenericAuth } = require('./generic-auth');
 const { buildContext } = require('./normalize');
 const db = require('./db');
 const { listCalls } = db;
+const apiTokens = require('./api-tokens');
 const { invoke } = require('./invoke');
 const { replayCall } = require('./replay');
 
@@ -60,20 +64,56 @@ function redactConfig(value, key = '') {
   return value;
 }
 
-/** Generic-auth gate for /api/* and anything else marked protected. */
+/**
+ * Generic-auth gate for /api/* and anything else marked protected. Beyond the
+ * boolean gate it tags req.authPrincipal ({ source: master|db-token|hmac, … })
+ * so the token-management routes can enforce the master-only rule: the env
+ * bearer token (AUTH_BEARER_TOKEN) is the only credential allowed to
+ * create/list/revoke db tokens; db tokens access everything else.
+ */
 function makeAuthGuard(genericAuth, logger) {
   return async function guard(req, res, next) {
     if (!genericAuth) return next();
     const raw = await captureRawBody(req).catch(() => '');
     const ctx = buildContext(raw, req, 'api');
-    const ok = await genericAuth.verifyRaw(ctx, raw);
+    const { ok, principal } = await genericAuth.verifyIdentity(ctx, raw);
     if (!ok) {
       logger.warn(`api ${req.method} ${req.path} → 401 (auth failed)`);
       res.status(401).json({ error: 'unauthorized' });
       return;
     }
+    req.authPrincipal = principal || { source: 'unknown' };
     next();
   };
+}
+
+/** Master-only gate for the /api/tokens routes (403 for everyone else). */
+function makeMasterOnlyGuard(logger) {
+  return function masterOnly(req, res) {
+    if (!req.authPrincipal || req.authPrincipal.source !== 'master') {
+      logger.warn(
+        `api ${req.method} ${req.path} → 403 (token management requires the env master bearer token; caller: ` +
+          `${req.authPrincipal ? req.authPrincipal.source : 'none'}`
+      );
+      res.status(403).json({ error: 'master token required' });
+      return false;
+    }
+    return true;
+  };
+}
+
+function mapTokenError(res, e, route, log) {
+  if (e instanceof apiTokens.TokenInputError) {
+    res.status(400).json({ error: e.message });
+    return;
+  }
+  if (db.isDbUnreachable(e)) {
+    log.warn(`${route}: database unavailable (${e.message})`);
+    res.status(503).json({ error: 'database unavailable' });
+    return;
+  }
+  log.error(`${route} failed: ${e.stack || e.message}`);
+  res.status(500).json({ error: 'internal error' });
 }
 
 function createApp({ logger, genericAuth, port }) {
@@ -174,6 +214,66 @@ function createApp({ logger, genericAuth, port }) {
       logger.error(`api /calls/${id}/replay failed: ${e.stack || e.message}`);
       res.status(500).json({ error: 'internal error' });
     }
+  });
+
+  // Who am I? The dashboard uses this to decide whether the current caller
+  // is the env MASTER (may manage db tokens) or a db token (may not).
+  apiRouter.get('/whoami', (req, res) => {
+    res.json({ principal: req.authPrincipal || { source: 'none' } });
+  });
+
+  // --- db-managed bearer tokens (master-only management) ---------------------
+  // GET  /tokens             → metadata for every token (never hash or plaintext)
+  // POST /tokens             → { name, expiresAt? } ; response carries the ONLY
+  //                            copy of the plaintext (sha256 at rest, rule 7)
+  // POST /tokens/:id/revoke  → soft revoke (sets revokedAt; row kept as audit
+  //                            trail) — same shape as /calls/:id/replay
+  const masterOnly = makeMasterOnlyGuard(logger);
+
+  apiRouter.get('/tokens', (req, res) => {
+    if (!masterOnly(req, res)) return;
+    apiTokens
+      .listTokens()
+      .then((tokens) => res.json({ total: tokens.length, tokens }))
+      .catch((e) => mapTokenError(res, e, 'api /tokens', logger));
+  });
+
+  apiRouter.post('/tokens', (req, res) => {
+    if (!masterOnly(req, res)) return;
+    let input;
+    try {
+      input = apiTokens.parseTokenRequest(req._rawBody || '');
+    } catch (e) {
+      res.status(400).json({ error: e.message });
+      return;
+    }
+    apiTokens
+      .createToken(input)
+      .then(({ plaintext, token }) => {
+        logger.info(`api POST /tokens → created db token "${token.name}" (#${token.id}) by master`);
+        res.status(201).json({ token, plaintext });
+      })
+      .catch((e) => mapTokenError(res, e, 'api POST /tokens', logger));
+  });
+
+  apiRouter.post('/tokens/:id/revoke', (req, res) => {
+    if (!masterOnly(req, res)) return;
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      res.status(400).json({ error: 'expected numeric token id' });
+      return;
+    }
+    apiTokens
+      .revokeToken(id)
+      .then((token) => {
+        if (!token) {
+          res.status(404).json({ error: `token not found: ${id}` });
+          return;
+        }
+        logger.info(`api POST /tokens/${id}/revoke → revoked db token "${token.name}" by master`);
+        res.json({ token });
+      })
+      .catch((e) => mapTokenError(res, e, `api POST /tokens/${id}/revoke`, logger));
   });
 
   app.use('/api', apiRouter);

@@ -77,13 +77,15 @@ async function invoke({ req, res, webhookName, rawBody, ctx, db, logger, discove
 
   let done = false;
   let authResult = 'none';
+  let genericTokenName = null; // set when generic auth passed via a db token (log line only; the auth column stays 'generic' — rule 15)
 
   const finish = (finalStatus) => {
     if (done) return Promise.resolve();
     done = true;
     const durationMs = Date.now() - started;
     child.info(
-      `${ctx.method} ${ctx.path} → ${finalStatus} (${durationMs}ms) auth=${authResult} bytes_in=${rawBody.length}`
+      `${ctx.method} ${ctx.path} → ${finalStatus} (${durationMs}ms) auth=${authResult}` +
+        `${genericTokenName ? ` token="${genericTokenName}"` : ''} bytes_in=${rawBody.length}`
     );
     return db
       .recordWebhookCall(ctx, finalStatus, authResult, durationMs)
@@ -142,7 +144,9 @@ async function invoke({ req, res, webhookName, rawBody, ctx, db, logger, discove
     authResult = 'module';
   } else if (genericAuth && entry && entry.config && entry.config.useGlobalAuth === true) {
     // No module auth, but config.json opted in to the engine's generic auth.
-    const ok = await genericAuth.verifyRaw(ctx, rawBody);
+    // verifyIdentity distinguishes the env master from a db-managed token so
+    // the log line can name the token; the recorded auth value stays 'generic'.
+    const { ok, principal } = await genericAuth.verifyIdentity(ctx, rawBody);
     if (!ok) {
       authResult = 'denied';
       res.status(401).json({ error: 'unauthorized' });
@@ -150,6 +154,7 @@ async function invoke({ req, res, webhookName, rawBody, ctx, db, logger, discove
       return;
     }
     authResult = 'generic';
+    if (principal && principal.source === 'db-token') genericTokenName = principal.name;
   } else {
     child.warn('open endpoint (no auth) — add auth(ctx) or set "useGlobalAuth": true in config.json');
     authResult = 'none';

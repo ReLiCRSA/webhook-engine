@@ -9,6 +9,7 @@ require('dotenv').config();
 const logger = require('./logger');
 const db = require('./db');
 const discover = require('./discover');
+const apiTokens = require('./api-tokens');
 const { createGenericAuth } = require('./generic-auth');
 const { createApp } = require('./app');
 
@@ -33,10 +34,17 @@ async function main() {
     startup.warn(`database unavailable (${e.message}) — call logging disabled, will retry per request`);
   }
 
-  const genericAuth = createGenericAuth();
+  // Db-managed bearer tokens (api_tokens): accepted for generic auth next to
+  // the env master; verification degrades to null (master-only) when the DB
+  // is unreachable, so the hook needs no dbUp check here.
+  const genericAuth = createGenericAuth(process.env, {
+    extraBearerVerify: (token) => apiTokens.verifyBearer(token),
+  });
   if (genericAuth) {
     const parts = [];
-    if (genericAuth.bearerActive) parts.push('bearer token');
+    if (genericAuth.bearerActive) {
+      parts.push('bearer token (env master; + db-managed tokens via api_tokens)');
+    }
     if (genericAuth.hmacActive) parts.push(`hmac (${genericAuth.hmacSecrets.length} secret(s))`);
     startup.info(`generic auth enabled: ${parts.join(' + ')}`);
   } else {
