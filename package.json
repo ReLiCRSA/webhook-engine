@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
+    "test": "node --test \"webhooks/*/test/**/*.test.js\"",
     "db:up": "docker compose up -d",
     "db:down": "docker compose down",
     "db:migrate": "node scripts/db-migrate.js",

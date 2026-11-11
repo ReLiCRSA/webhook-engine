@@ -49,7 +49,8 @@ src/            engine core
   invoke.js     pipeline: auth → handler → response-wrap → record
   db.js         Prisma singleton, call recording, header redaction, listCalls
   logger.js     pluggable logger (stdout | file | logstash)
-webhooks/       one directory per webhook (example/, open/, gated/)
+webhooks/       one directory per webhook; each module is self-contained and
+                self-documenting (own README.md + VALIDATION.md, see below)
 web/            React dashboard (Vite); built output in web/dist, served at /
 prisma/         schema + migrations (WebhookCall model)
 docker-compose.yml  Postgres 16 on 127.0.0.1:5432 (npm run db:up / db:down)
@@ -95,6 +96,15 @@ webhooks/my-hook/
   index.js         required — module.exports = { handler, auth? }
   config.json      optional — e.g. { "useGlobalAuth": true }
   package.json     recommended — own deps, installed into its own node_modules
+  README.md        recommended — the module's documentation lives **there**, not
+                   in this file: routes, settings, credentials, degraded mode.
+                   Engine docs stay module-agnostic.
+  VALIDATION.md    recommended — the module's own verification matrix + curl
+                   commands; the AGENTS.md validation pass discovers it
+                   (`ls webhooks/*/VALIDATION.md`) and runs it with the engine's
+  test/            optional — `node --test` suites; `npm test` from the repo
+                   root runs every `webhooks/*/test/**/*.test.js` (no DB, no
+                   network expected)
 ```
 
 Discovered directories:
@@ -488,6 +498,12 @@ COMMIT;
    applied** — it drift-detects the extension tables and offers to reset the
    whole schema (data loss). Only `prisma migrate deploy` is safe; it re-checks
    the ledger, sees nothing pending, and exits 0.
+7. **Foreign keys between extension tables need `ON UPDATE CASCADE`.** The
+   Prisma fragment declares the relation with the default referential action,
+   and `db:check` compares the fragment against the live database: an FK left
+   at the Postgres default (`NO ACTION`) is reported as drift. A worked example
+   (FK-fix migration + ledger invariants) is documented in the owning module's
+   README (its *Ledger* section) — module facts live with the module.
 
 ### Applying migrations (engine + webhook, in order)
 
@@ -657,3 +673,8 @@ BODY='{"k":"v"}'
 SIG=$(node -e 'console.log(require("crypto").createHmac("sha256","secret-a").update(process.argv[1],"utf8").digest("hex"))' "$BODY")
 curl -s -o /dev/null -w '%{http_code}\n' -X POST $B/webhook/gated -H "X-Signature: $SIG" -H 'content-type: application/json' -d "$BODY"  # 201
 ```
+
+The engine and its own test fixtures (`example`, `open`, `gated`) are covered
+above. Webhook modules extend the checks with **module-owned matrices**:
+`ls webhooks/*/VALIDATION.md` discovers them, and the AGENTS.md validation
+pass runs every discovered file under the preconditions it states.

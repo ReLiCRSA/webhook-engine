@@ -2,7 +2,9 @@
 
 Working rules for agents (and humans) in this repository. The README.md holds
 setup and API reference; this file holds the invariants that must not be
-broken.
+broken. Module-specific rules, docs and validations are **owned by the module
+directory** and discovered from here (each webhook ships its own README.md /
+VALIDATION.md) — keep this file module-agnostic.
 
 ## Hard rules
 
@@ -56,7 +58,17 @@ broken.
    `LOG_SINKS` (`stdout|file|logstash`).
 9. **config.json is re-read per request; index.js is cached.** Treat
    `webhooks/<name>/config.json` as a live config file (no restart to change
-   auth mode); module restarts require a server restart (or nodemon).
+   auth mode); module restarts require a server restart (or nodemon). It is also
+   the module's **credential file**: a webhook must be self-contained, so its
+   webhook secrets and API tokens are read from its own config.json first and
+   from an env var only as a fallback (the module's own README names its
+   fallback vars). config.json **is git-tracked**, so never commit a real
+   credential — ship placeholders, edit them on the host, and let env be the
+   fallback for deployments that keep secrets out of git. `GET /api/webhooks`
+   hands config.json to the dashboard, which is safe only because
+   `redactConfig` in `src/app.js` masks values under keys matching
+   `secret|token|key|credential|signature` — keep credential key names inside
+   that pattern (or add a redacted accessor before exposing a new config field).
 10. **Dashboard is built output, not live source.** `web/dist` is served at
     `/` and is checked for existence at `createApp` time — rebuild with
     `npm run web:build` **and restart the engine** after frontend changes.
@@ -78,9 +90,16 @@ broken.
 
 ## Verification matrix
 
-Run against a live server (defaults from `.env`: `AUTH_MODE=bearer`,
-`AUTH_BEARER_TOKEN=dev-token-change-me`, `DISABLE_TEST_WEBHOOKS` **unset**).
-All rows must hold:
+A full validation pass is **discovered, not enumerated**: the engine matrix
+below **plus every module-owned matrix in the webhook directories** —
+`ls webhooks/*/VALIDATION.md`. Each module file carries its own matrix, curl
+commands and preconditions, and **all of its rows must hold too**; a module
+that ships a VALIDATION.md is automatically part of the pass with no change to
+this file. (Module docs live in `webhooks/<name>/README.md`.)
+
+Engine rows — run against a live server (defaults from `.env`:
+`AUTH_MODE=bearer`, `AUTH_BEARER_TOKEN=dev-token-change-me`,
+`DISABLE_TEST_WEBHOOKS` **unset**). All rows must hold:
 
 | # | Request | Expected status | Expected `auth` in DB row |
 |---|---------|-----------------|---------------------------|
@@ -114,6 +133,14 @@ Invariants to re-check after any change:
   line, the built-in webhooks (`example`, `open`, `gated`) are absent from the
   startup log and `GET /api/webhooks`, and requests to them 404 like unknown
   webhooks (`auth=denied`). Unset: the full matrix above must pass.
+- A webhook module is self-contained: it runs with **no module-specific env
+  vars** in the engine's environment (its own config.json carries its
+  credentials; env vars are only the fallback). `GET /api/webhooks` shows the
+  module's config.json with the value of every
+  `webhookSecret`/`apiKey`/`apiToken`/`token` key as `***`, and a module with
+  a status route reports each credential's **source** (`config.json` /
+  `env NAME` / `missing`) — never a value. The concrete per-module checks live
+  in that module's VALIDATION.md.
 - `GET /` serves the built dashboard only when `web/dist` exists **before**
   the engine starts (otherwise the placeholder page is shown — restart needed
   after a build).
@@ -125,9 +152,20 @@ Invariants to re-check after any change:
 - `npm run prisma:generate` prints one fragment line per
   `webhooks/<name>/model.prisma`, assembles engine schema + fragments into
   `prisma/generated/schema.prisma`, and the generated client exposes typed
-  models for extension tables (e.g. `exampleEvent`, `productboardEntityLink`);
-  a model/table collision exits 1 without generating. `npm run db:check`
-  exits 0 on a fully migrated database. `npm run db:migrate` finishes with
-  that same client regeneration (its step 3), and `npm run db:migrate --
-  --skip-generate` omits it.
-- `node --check` passes on every `src/*.js`.
+  models for extension tables (one typed model per model declared in a
+  fragment — e.g. `exampleEvent` from the demo webhook); a model/table collision
+  exits 1 without generating. `npm run db:check` exits 0 on a fully migrated database.
+  `npm run db:migrate` finishes with that same client regeneration (its step 3),
+  and `npm run db:migrate -- --skip-generate` omits it.
+- `node --check` passes on every `src/*.js` **and** every `webhooks/**/*.js`
+  (excluding `node_modules`) — module code is loaded in-process, so a syntax
+  error there is a runtime failure.
+- `npm test` (the module suites: `node --test "webhooks/*/test/**/*.test.js"`)
+  passes with no database and no network. A module's suites are first-class
+  deliverables, not extras — which behaviours they pin is module detail,
+  stated by that module's README/VALIDATION.md, not by this file.
+- With Postgres stopped (`docker compose stop`), rule 14 extends to modules:
+  provider deliveries must still ack normally, and the engine stays up and
+  serves the other webhooks. Each module's degraded-mode contract — which
+  routes answer 503/200-with-error, what gets logged, what resumes without a
+  restart — is stated in that module's VALIDATION.md and must hold there.

@@ -9,10 +9,11 @@ prisma/generated/
 # graphify knowledge graph (local build output)
 graphify-out/
 
-# generated webhook test payloads (contain real workspace ids/emails)
+# generated module test payloads (contain real workspace ids/emails) —
+# unanchored pattern, matches test-payloads/ at any depth (e.g. inside a webhook)
 test-payloads/
 
-# webhooks: keep only the project ones (example, open, gated)
+# webhooks: keep only the project ones (example, open, gated, pb-lin-sync)
 webhooks/*
 !webhooks/example/
 !webhooks/open/
